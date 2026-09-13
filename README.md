@@ -74,8 +74,67 @@ Secure Payment Orchestrator adalah layanan backend berbasis **Rust** yang menyed
 
 ---
 
+## Apa Itu "Provider Simulator"? Apakah Ini Payment Gateway?
+
+### ❌ Ini BUKAN Payment Gateway
+
+Secure Payment Orchestrator **bukan** payment gateway seperti Midtrans, Xendit, Stripe, atau GoPay. Sistem ini **tidak**:
+- Memproses pembayaran langsung dari customer
+- Menyimpan data kartu kredit / PAN / CVV
+- Berkomunikasi dengan bank atau processor
+- Menyediakan halaman checkout / payment page
+- Mengelola settlement atau payout
+
+### ✅ Ini adalah Payment Orchestrator (Lapisan Abstraksi)
+
+SPO adalah lapisan **orchestrator** yang duduk di **antara merchant dan payment gateway**:
+
+```
+┌──────────────┐         ┌──────────────────┐         ┌──────────────────────┐
+│   Merchant   │ ───API──▶│  SPO Orchestrator │ ───API──▶│  Payment Gateway     │
+│   App / Site │◀────────│   (Abstraction)   │◀────────│  (Midtrans/Xendit/   │
+└──────────────┘         └──────────────────┘         │   Stripe/dll)        │
+                                                      └──────────────────────┘
+```
+
+Fungsi SPO:
+- **Menormalisasi** perbedaan API dari berbagai payment gateway
+- **Melindungi** merchant dari transaksi ganda, webhook palsu, dan timeout
+- **Menyediakan** audit trail terpusat untuk semua transaksi
+- **Memudahkan** ganti atau nambah payment gateway tanpa mengubah kode merchant
+
+### 🧪 Lalu Apa Itu "Provider Simulator"?
+
+Provider simulator adalah **versi tiruan** dari payment gateway yang berjalan **lokal di komputer**. Karena POC ini tidak terhubung ke payment gateway sungguhan (Midtrans, Xendit, Stripe, dll), kami membuat simulator yang:
+
+| Aspek | Provider Simulator | Payment Gateway Sungguhan |
+| --- | --- | --- |
+| **API** | Sama contract-nya | Midtrans / Xendit / Stripe API |
+| **Response** | Dikontrol (success/rejection/timeout) | Tergantung pembayaran customer |
+| **Webhook** | Dikirim lokal | Dikirim dari server cloud |
+| **Uang** | ❌ Tidak ada uang sungguhan | ✅ Memproses transaksi riil |
+| **Koneksi** | `localhost:9091/9092/9093` | Internet / cloud |
+
+**Tujuan simulator:**
+1. **Membuktikan arsitektur** — bahwa pola adapter, retry, circuit breaker, dan webhook verification bekerja
+2. **Testing tanpa risiko** — bisa simulasi timeout, error, dan skenario gagal tanpa kehilangan uang
+3. **Demonstrasi** — reviewer bisa menjalankan seluruh sistem di laptop dengan satu perintah Docker
+
+### 🔄 Analogi Sederhana
+
+| Konsep | Analogi |
+| --- | --- |
+| **Payment Gateway** (Midtrans/Stripe) | Seperti **toko** yang menerima pembayaran dari pelanggan |
+| **SPO Orchestrator** | Seperti **resepsionis** yang mengatur antrian dan memastikan tidak ada duplikasi |
+| **Provider Simulator** | Seperti **role-play / latihan** di mana resepsionis berlatih tanpa toko sungguhan |
+
+Jadi: **SPO bukan payment gateway, melainkan orchestrator yang mempermudah penggunaan payment gateway. Provider simulator adalah alat bantu untuk testing dan demonstrasi.**
+
+---
+
 ## Daftar Isi
 
+- [Apa Itu Provider Simulator? Apakah Ini Payment Gateway?](#apa-itu-provider-simulator-apakah-ini-payment-gateway)
 - [Untuk Siapa Aplikasi Ini?](#untuk-siapa-aplikasi-ini)
 - [Masalah Apa yang Ingin Diselesaikan?](#masalah-apa-yang-ingin-diselesaikan)
 - [Manfaat Aplikasi Ini](#manfaat-aplikasi-ini)

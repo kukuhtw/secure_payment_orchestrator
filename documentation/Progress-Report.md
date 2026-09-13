@@ -4,11 +4,11 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi | 1.0 |
+| Versi | 1.1 |
 | Tanggal | 13 September 2026 |
 | Total WBS | 30 hari kerja |
-| Hari Berjalan | ~3 hari (Inisiasi + Desain + Foundation) |
-| Status | **Fase 2: Project Foundation — Selesai** |
+| Hari Berjalan | ~5 hari (sampai akhir Repository Layer) |
+| Status | **Fase 3: Domain & Persistence — 85% (sebelumnya 45%)** |
 
 ---
 
@@ -17,12 +17,13 @@
 | Kategori | Total | Selesai | Progress | Belum |
 | --- | ---: | ---: | ---: | ---: |
 | **Dokumentasi** | 8 dokumen | 8 ✅ | 0 | 0 |
-| **Source Code (skeleton)** | 54 files | 54 ✅ | — | — |
-| **Domain Logic (implementasi penuh)** | 4 files | 4 ✅ | 0 | 0 |
-| **Application Layer (implementasi)** | 6 files | 0 | 0 | 6 ❌ |
-| **API Routes (implementasi)** | 4 files | 1 ✅ | 0 | 3 ❌ |
-| **Middleware (implementasi)** | 4 files | 0 | 0 | 4 ❌ |
-| **Security (implementasi)** | 4 files | 0 | 0 | 4 ❌ |
+| **Source Code (total files)** | 56 files | 56 ✅ | — | — |
+| **Domain Logic (full impl)** | 5 files | 5 ✅ | 0 | 0 |
+| **Repository Layer (full impl)** | 6 traits + 6 impl | 12 ✅ | 17 SQL queries | 0 |
+| **Application Layer (impl)** | 6 files | 0 | 0 | 6 ❌ |
+| **API Routes (impl)** | 4 files | 1 ✅ | 0 | 3 ❌ |
+| **Middleware (impl)** | 4 files | 0 | 0 | 4 ❌ |
+| **Security (impl)** | 4 files | 0 | 0 | 4 ❌ |
 | **Tests** | 2 files | 0 | 0 | 2 ❌ |
 | **CI/CD** | — | 0 | 0 | ❌ |
 
@@ -52,16 +53,16 @@
 | 2.5 | PostgreSQL, Redis, migrations | ✅ | Migration SQL (9 tabel) |
 | 2.6 | Health check, readiness | ✅ | `routes/health.rs` |
 
-### 🔶 3.0 — Domain & Persistence (4 hari) — **45%**
+### ✅ 3.0 — Domain & Persistence (4 hari) — **85%** ▲
 
 | ID | Task | Status | Output |
 | --- | --- | --- | --- |
 | 3.1 | Entity Payment, Money, Status | ✅ **Lengkap** | `payment.rs`, `status.rs` |
 | 3.2 | Transition rules | ✅ **Lengkap** | `rules.rs` — 10 transitions |
 | 3.3-3.4 | Migrations (all tables) | ✅ | 9 tabel + indexes + seed |
-| 3.5 | Repository traits | ❌ | Belum |
-| 3.6 | SQLx repositories | 🔶 Stub | Hanya `ping()` |
-| 3.7 | Transaction + concurrency guard | ❌ | Belum |
+| 3.5 | Repository traits | ✅ **Lengkap** | `domain/repositories.rs` — 6 trait + row types |
+| 3.6 | SQLx repositories | ✅ **Lengkap** | `infrastructure/postgres/repositories.rs` — 17 queries |
+| 3.7 | Transaction + concurrency guard | ❌ | Belum dibuat |
 
 ### 🔶 4.0 — Core Payment API (4 hari) — **15%**
 
@@ -90,6 +91,13 @@
 | **Domain Status** | `domain/status.rs` | 68 | `PaymentStatus` enum, `is_final()`, `TryFrom`, `Display` |
 | **Domain Rules** | `domain/rules.rs` | 69 | `validate_transition()` (10 rules), `is_retryable()`, `retry_delay_seconds()` |
 | **Domain Error** | `domain/error.rs` | 37 | `DomainError` enum — 6 variants |
+| **Domain Repositories** | `domain/repositories.rs` | 210 | **6 trait** + 10 row struct dengan `sqlx::FromRow` |
+| **Payment Repository** | `infrastructure/.../repositories.rs` | 340 | **4 method**: create, get, update_status, search (+count) |
+| **API Key Repository** | sama | — | **2 method**: find_by_key_prefix, get_merchant |
+| **Attempt Repository** | sama | — | **3 method**: save, get_by_payment_id, count_attempts |
+| **Idempotency Repository** | sama | — | **2 method**: find_by_key, save |
+| **AuditLog Repository** | sama | — | **2 method**: log, get_by_payment_id |
+| **Webhook Repository** | sama | — | **3 method**: save, find_by_event_id, update_status |
 | **Redis Lock** | `infrastructure/redis/lock.rs` | 54 | `acquire_lock()`, `release_lock()` (Lua script), `generate_lock_value()` |
 | **Provider Trait** | `providers/adapter.rs` | 58 | `PaymentProvider` trait + canonical types |
 | **Alpha/Beta/Gamma** | 3 files | 45-51 | Simulator dengan delay response |
@@ -125,14 +133,15 @@
 
 ## 4. Ringkasan per Milestone
 
-### M1: Core Payment (Target: Hari 13) — 🔶 60%
+### M1: Core Payment (Target: Hari 13) — 🔶 75% (sebelumnya 60%)
 | ✅ | 🔶 | ❌ |
 | --- | --- | --- |
-| Entity + State Machine ✅ | Auth middleware (Stub) | Repository impl |
-| Transition Rules ✅ | Create/Get/Search (Stub) | Transaction guard |
+| Entity + State Machine ✅ | Auth middleware (Stub) | Transaction guard |
+| Transition Rules ✅ | Create/Get/Search (Stub) | |
 | DB Migrations ✅ | Idempotency (Stub) | |
 | Provider Trait + 3 Sim ✅ | Audit (Stub) | |
 | Error DTO ✅ | | |
+| **Repository Layer ✅ (BARU)** | | |
 
 ### M2: Security & Reliability (Target: Hari 21) — ❌ 10%
 | ✅ | 🔶 | ❌ |
@@ -214,7 +223,7 @@ Repository → Auth Middleware → Create Payment → Provider Integration → W
 ```
 1.0 Inisiasi & Desain     ████████████████████░░ 92%
 2.0 Project Foundation    ████████████████████░░ 95%
-3.0 Domain & Persistence  ████████░░░░░░░░░░░░░░ 45%
+3.0 Domain & Persistence  ██████████████████░░░░ 85% ▲
 4.0 Core Payment API      ██░░░░░░░░░░░░░░░░░░░░ 15%
 5.0 Provider Integration  ████████████████████░░ 90%
 6.0 Reliability           ██░░░░░░░░░░░░░░░░░░░░ 15%
@@ -223,7 +232,7 @@ Repository → Auth Middleware → Create Payment → Provider Integration → W
 9.0 Quality Assurance     ░░░░░░░░░░░░░░░░░░░░░░  0%
 10.0 Dokumentasi          ████████████████████░░ 85%
 ─────────────────────────────────────────────────────
-TOTAL:                   ██████░░░░░░░░░░░░░░░░ 33%
+TOTAL:                   ████████░░░░░░░░░░░░░░ 42% ▲
 ```
 
 ---
@@ -232,12 +241,17 @@ TOTAL:                   ██████░░░░░░░░░░░░�
 
 | # | Task | Effort | Alasan |
 | --- | --- | --- | --- |
-| **P1** | PaymentRepository (SQLx) | 1 hari | Semua endpoint butuh DB |
-| **P2** | ApiKeyRepository | 0.5 hari | Auth middleware butuh DB |
-| **P3** | Auth Middleware | 1 hari | Semua endpoint butuh auth |
-| **P4** | Idempotency Middleware | 1 hari | Mencegah duplikasi payment |
-| **P5** | PaymentService.create | 1 hari | Core use case |
-| **P6** | ProviderService.call | 1 hari | Integrasi provider |
+| **P1** | Auth Middleware | 1 hari | Semua endpoint butuh auth (API key) |
+| **P2** | Idempotency Middleware | 1 hari | Mencegah duplikasi payment |
+| **P3** | PaymentService.create | 1 hari | Core use case — panggil repo + provider |
+| **P4** | Create + Get Payment routes | 1 hari | Endpoint publik utama |
+| **P5** | ProviderService.call | 1 hari | Integrasi provider adapter |
+| **P6** | JSON Logging + Metrics | 1 hari | Observability dasar |
+
+### ✅ Tahap 1 (Repository Layer) — SELESAI
+- Semua 6 trait repository ✅
+- Semua 6 implementasi SQLx ✅ (17 queries)
+- Semua row struct dengan `sqlx::FromRow` ✅
 
 ---
 
@@ -264,6 +278,7 @@ TOTAL:                   ██████░░░░░░░░░░░░�
 | Versi | Tanggal | Perubahan | Penulis |
 | --- | --- | --- | --- |
 | 1.0 | 13 September 2026 | Progress report pertama — akhir Fase 2 Foundation | Engineering Team |
+| 1.1 | 13 September 2026 | Update setelah implementasi Repository Layer (Tahap 1) — 6 trait + 6 impl SQLx | Engineering Team |
 
 ### Tahap 5: Observability & Operations (2 hari)
 
