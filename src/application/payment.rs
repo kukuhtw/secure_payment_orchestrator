@@ -1,0 +1,1 @@
+//! Payment service — orchestrates payment creation, retrieval, and status updates.
