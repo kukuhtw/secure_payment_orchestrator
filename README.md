@@ -2,6 +2,72 @@
 
 > **Status:** Proof of Concept | **Teknologi:** Rust, Axum, Tokio, PostgreSQL, Redis
 
+---
+
+## Untuk Siapa Aplikasi Ini?
+
+| Persona | Peran | Kebutuhan |
+| --- | --- | --- |
+| **🏢 Merchant Developer** | Developer yang mengintegrasikan pembayaran ke aplikasi e-commerce atau fintech | API yang sederhana dan konsisten, tidak perlu berurusan dengan banyak provider berbeda |
+| **👤 Customer** | Pengguna akhir yang melakukan pembayaran | Pengalaman bayar yang lancar, status transaksi yang jelas |
+| **🔧 Operations Analyst** | Tim internal yang memantau dan mengelola transaksi | Kemampuan menelusuri status transaksi, menjalankan rekonsiliasi, melihat audit trail |
+| **🔒 Security Reviewer** | Auditor keamanan yang memeriksa sistem | Verifikasi bahwa autentikasi, signature webhook, dan perlindungan data sudah benar |
+
+---
+
+## Masalah Apa yang Ingin Diselesaikan?
+
+Integrasi pembayaran langsung dari aplikasi merchant ke beberapa payment provider menimbulkan sejumlah masalah serius:
+
+### 🚫 1. Fragmentasi API Provider
+Setiap provider (Midtrans, Xendit, Stripe, GoPay, dll) memiliki:
+- Kontrak API yang berbeda
+- Format status yang berbeda (SUCCESS/COMPLETED/settlement)
+- Autentikasi yang berbeda (Basic Auth vs Bearer vs OAuth)
+- Error code dan format yang berbeda
+
+**Dampak:** Merchant harus menulis kode integrasi ulang setiap kali ganti atau menambah provider.
+
+### 🚫 2. Risiko Transaksi Ganda
+Ketika jaringan terputus setelah request dikirim tapi sebelum response diterima:
+- Merchant tidak tahu apakah transaksi berhasil atau gagal
+- Merchant mengirim ulang request → bisa menghasilkan **dua pembayaran** untuk satu order
+- Kerugian finansial langsung dan komplain dari customer
+
+### 🚫 3. Webhook Palsu / Berulang
+Provider mengirim notifikasi via webhook, tetapi:
+- Webhook bisa dipalsukan jika tidak ada signature verification
+- Webhook yang sama bisa dikirim berulang (duplicate event)
+- Webhook lama bisa di-replay oleh attacker
+
+### 🚫 4. Status Transaksi Tidak Pasti
+Ketika provider timeout setelah request terkirim:
+- Apakah transaksi berhasil atau gagal? Tidak diketahui
+- Provider sementara down → retry terus menerus → beban sistem
+- Tanpa circuit breaker → request tetap dikirim ke provider yang rusak
+
+### 🚫 5. Kesulitan Audit
+- Perubahan status tidak tercatat → sulit debug masalah
+- Percobaan ke provider tidak tersimpan → tidak tahu apa yang terjadi
+- Tim operasional tidak punya alat untuk rekonsiliasi
+
+---
+
+## Manfaat Aplikasi Ini
+
+| Manfaat | Penjelasan |
+| --- | --- |
+| **🔌 Satu API untuk Semua Provider** | Merchant hanya perlu mengenal satu API contract. Ganti provider? Cukup konfigurasi, tanpa perubahan kode merchant |
+| **🛡️ Idempotency Garansi** | Request yang sama dengan key yang sama → diproses tepat satu kali. Tidak ada transaksi ganda |
+| **📡 Webhook Aman** | Setiap webhook diverifikasi dengan HMAC SHA-256. Webhook palsu, expired, dan duplicate ditolak otomatis |
+| **🔄 Retry Cerdas** | Error sementara (timeout, 502, 503) di-retry dengan exponential backoff. Error permanen (validation error) tidak di-retry |
+| **⛑️ Circuit Breaker** | Jika provider gagal 5 kali berturut-turut, sistem berhenti mengirim request. Provider diuji berkala sampai pulih |
+| **🔍 Status Tidak Pasti?** | Timeout setelah request terkirim → masuk reconciliation. Operations bisa query status ke provider |
+| **📝 Audit Trail Lengkap** | Setiap perubahan status, percobaan ke provider, dan webhook tercatat dengan actor, waktu, dan metadata |
+| **🏗️ Provider Adapter Pattern** | Provider baru cukup implementasi satu trait. Tidak perlu mengubah domain pembayaran |
+
+---
+
 Secure Payment Orchestrator adalah layanan backend berbasis **Rust** yang menyediakan satu antarmuka pembayaran terpadu untuk menghubungkan merchant dengan beberapa payment provider. Sistem ini menangani pemilihan provider, pencegahan transaksi ganda (idempotency), retry aman, failover terbatas, webhook terverifikasi (HMAC), rekonsiliasi, dan audit trail lengkap.
 
 > **⚠️ Peringatan:** Ini adalah Proof of Concept (POC) yang menggunakan **provider simulasi** dan **tidak memproses uang sungguhan**. Jangan gunakan di production.
@@ -10,6 +76,9 @@ Secure Payment Orchestrator adalah layanan backend berbasis **Rust** yang menyed
 
 ## Daftar Isi
 
+- [Untuk Siapa Aplikasi Ini?](#untuk-siapa-aplikasi-ini)
+- [Masalah Apa yang Ingin Diselesaikan?](#masalah-apa-yang-ingin-diselesaikan)
+- [Manfaat Aplikasi Ini](#manfaat-aplikasi-ini)
 - [Fitur](#fitur)
 - [Tech Stack](#tech-stack)
 - [Arsitektur](#arsitektur)
