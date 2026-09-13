@@ -1,0 +1,821 @@
+openapi: "3.0.3"
+info:
+  title: Secure Payment Orchestrator API
+  description: |
+    Secure Payment Orchestrator adalah layanan backend yang menyediakan
+    satu antarmuka pembayaran untuk menghubungkan merchant dengan beberapa
+    payment provider. Sistem menangani pemilihan provider, pencegahan
+    transaksi ganda, retry yang aman, failover terbatas, webhook
+    terverifikasi, rekonsiliasi, dan audit trail.
+
+    Proof of Concept menggunakan provider simulasi dan tidak memproses
+    uang sungguhan. Tujuan utamanya adalah membuktikan rancangan layanan
+    pembayaran yang benar, dapat diuji, aman, mudah diaudit, dan tahan
+    terhadap kegagalan jaringan maupun provider.
+  version: "1.0.0"
+  contact:
+    name: Engineering Team
+  x-status: Draft untuk Proof of Concept
+  x-date: 2026-09-13
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: http://localhost:8080/api/v1
+    description: Local development server (API v1 prefix)
+
+paths:
+  /api/v1/payments:
+    post:
+      operationId: createPayment
+      summary: Membuat pembayaran baru
+      description: |
+        Membuat pembayaran baru dan memilih provider untuk diproses.
+        Menggunakan Idempotency-Key untuk mencegah duplikasi.
+      tags:
+        - Payments
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        "201":
+          description: Payment berhasil dibuat
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+        "200":
+          description: Request idempotent - mengembalikan payment yang sudah ada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+          headers:
+            X-Idempotent-Replay:
+              schema:
+                type: string
+                example: "true"
+              description: Menandakan response adalah hasil replay dari request sebelumnya
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "409":
+          description: Idempotency key sudah digunakan dengan payload berbeda
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "422":
+          $ref: '#/components/responses/UnprocessableError'
+
+    get:
+      operationId: searchPayments
+      summary: Mencari pembayaran
+      description: |
+        Mencari pembayaran dengan filter merchant reference, status,
+        provider, dan rentang waktu. Mendukung pagination.
+      tags:
+        - Payments
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: merchant_reference
+          in: query
+          description: Filter berdasarkan merchant reference
+          schema:
+            type: string
+          example: "ORDER-10001"
+        - name: status
+          in: query
+          description: Filter berdasarkan status payment
+          schema:
+            $ref: '#/components/schemas/PaymentStatus'
+        - name: provider
+          in: query
+          description: Filter berdasarkan provider
+          schema:
+            $ref: '#/components/schemas/ProviderName'
+        - name: from_date
+          in: query
+          description: Filter created_at >= tanggal ini (ISO 8601)
+          schema:
+            type: string
+            format: date-time
+          example: "2026-09-01T00:00:00Z"
+        - name: to_date
+          in: query
+          description: Filter created_at <= tanggal ini (ISO 8601)
+/api/v1/payments/{payment_id}:
+    get:
+      operationId: getPayment
+      summary: Mendapatkan detail pembayaran
+      description: |
+        Mendapatkan detail lengkap pembayaran termasuk riwayat attempt
+        dan webhook events. Merchant hanya dapat mengakses payment miliknya.
+      tags:
+        - Payments
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          description: ID pembayaran
+          schema:
+            type: string
+            pattern: "^pay_[a-zA-Z0-9]+$"
+          example: "pay_01J8ZVX8B8"
+      responses:
+        "200":
+          description: Detail pembayaran
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetPaymentResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+
+  /api/v1/payments/{payment_id}/cancel:
+    post:
+      operationId: cancelPayment
+      summary: Membatalkan pembayaran
+      description: |
+        Membatalkan pembayaran yang belum mencapai status final
+        (SUCCESS atau FAILED).
+      tags:
+        - Payments
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^pay_[a-zA-Z0-9]+$"
+          example: "pay_01J8ZVX8B8"
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelPaymentRequest'
+      responses:
+        "200":
+          description: Pembayaran berhasil dibatalkan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelPaymentResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "422":
+          $ref: '#/components/responses/UnprocessableError'
+
+  /api/v1/payments/{payment_id}/retry:
+    post:
+      operationId: retryPayment
+      summary: Retry manual pembayaran
+      description: |
+        Melakukan retry manual untuk pembayaran yang gagal.
+        Hanya dapat dilakukan oleh Operations (API key dengan permission ops).
+      tags:
+        - Operations
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^pay_[a-zA-Z0-9]+$"
+          example: "pay_01J8ZVX8B8"
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "200":
+          description: Retry berhasil dimulai
+          content:
+            application/json:
+              schema:
+/api/v1/webhooks/{provider}:
+    post:
+      operationId: receiveWebhook
+      summary: Menerima webhook dari provider
+      description: |
+        Menerima notifikasi webhook dari provider untuk memperbarui
+        status pembayaran. Webhook diverifikasi menggunakan HMAC SHA-256
+        signature.
+      tags:
+        - Webhooks
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: Nama provider pengirim webhook
+          schema:
+            $ref: '#/components/schemas/ProviderName'
+          example: "alpha"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookRequest'
+      responses:
+        "200":
+          description: Webhook berhasil diproses atau duplicate event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        "401":
+          description: Signature tidak valid atau webhook expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Liveness check
+      description: Health check endpoint untuk Kubernetes / Docker liveness probe.
+      tags:
+        - System
+      responses:
+        "200":
+          description: Service sehat
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness check
+      description: |
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        API key dikirim sebagai Bearer token.
+        Format: `Bearer <api_key>`
+        Contoh: `Bearer sk_live_abc123def456`
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Key unik untuk mencegah duplikasi request. Key yang sama dengan
+        payload yang sama akan mengembalikan response sebelumnya
+        (idempotent). Key yang sama dengan payload berbeda akan ditolak.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      example: "checkout-order-10001"
+
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      required:
+        - merchant_reference
+        - amount
+        - currency
+      properties:
+        merchant_reference:
+          type: string
+          description: "Referensi unik dari merchant (order ID)"
+          minLength: 1
+          maxLength: 255
+          example: "ORDER-10001"
+        amount:
+          type: integer
+          description: "Jumlah dalam satuan terkecil (sen). Rp 2.500 = 250000"
+          minimum: 1
+          example: 250000
+        currency:
+          type: string
+          description: "Kode ISO 4217. Didukung: IDR, SGD"
+          minLength: 3
+          maxLength: 3
+          example: "IDR"
+        customer:
+          $ref: '#/components/schemas/CustomerInfo'
+        description:
+          type: string
+          description: "Deskripsi pembayaran"
+          maxLength: 1000
+          example: "Pembayaran ORDER-10001"
+        metadata:
+          type: object
+          description: "Data tambahan untuk audit"
+          additionalProperties: true
+
+    CustomerInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          description: "Nama customer"
+          maxLength: 255
+          example: "Budi Santoso"
+        email:
+          type: string
+          format: email
+          description: "Email customer"
+          maxLength: 255
+          example: "budi@example.com"
+
+    CancelPaymentRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: "Alasan pembatalan"
+          maxLength: 500
+          example: "Customer changed mind"
+
+    WebhookRequest:
+      type: object
+      required:
+        - event_id
+        - event_type
+        - payment_id
+        - status
+        - timestamp
+      properties:
+        event_id:
+          type: string
+          description: "ID unik event dari provider"
+          example: "evt_alpha_001"
+        event_type:
+          type: string
+          description: "Tipe event: payment.success, payment.failed"
+          enum:
+            - payment.success
+            - payment.failed
+        payment_id:
+          type: string
+          description: "ID internal payment"
+          example: "pay_01J8ZVX8B8"
+        status:
+          type: string
+          description: "Status dari provider: COMPLETED, FAILED"
+          example: "COMPLETED"
+        amount:
+          type: integer
+          description: "Jumlah pembayaran"
+          example: 250000
+        currency:
+          type: string
+          description: "Mata uang"
+          example: "IDR"
+        failure_reason:
+          type: string
+          description: "Alasan kegagalan (jika event_type = payment.failed)"
+          example: "insufficient_funds"
+        timestamp:
+          type: string
+          format: date-time
+          description: "Waktu kejadian (ISO 8601)"
+CreatePaymentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+              description: "ID unik pembayaran (format: pay_ prefix)"
+              example: "pay_01J8ZVX8B8"
+            merchant_reference:
+              type: string
+              example: "ORDER-10001"
+            status:
+              $ref: '#/components/schemas/PaymentStatus'
+            amount:
+              type: integer
+              example: 250000
+            currency:
+              type: string
+              example: "IDR"
+            provider:
+              $ref: '#/components/schemas/ProviderName'
+            payment_url:
+              type: string
+              format: uri
+              description: "URL redirect ke provider"
+              example: "http://localhost:9091/pay/pay_01J8ZVX8B8"
+            created_at:
+              type: string
+              format: date-time
+              example: "2026-09-13T10:00:00Z"
+
+    GetPaymentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+            merchant_reference:
+              type: string
+            status:
+              $ref: '#/components/schemas/PaymentStatus'
+            amount:
+              type: integer
+            currency:
+              type: string
+            provider:
+              $ref: '#/components/schemas/ProviderName'
+            payment_url:
+              type: string
+              format: uri
+            attempts:
+              type: array
+              items:
+                $ref: '#/components/schemas/PaymentAttempt'
+            webhook_events:
+              type: array
+              items:
+                $ref: '#/components/schemas/WebhookEventInfo'
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+            completed_at:
+              type: string
+              format: date-time
+              nullable: true
+
+    PaymentAttempt:
+      type: object
+      properties:
+        attempt_number:
+          type: integer
+        provider:
+          $ref: '#/components/schemas/ProviderName'
+PaymentSummary:
+      type: object
+      properties:
+        payment_id:
+          type: string
+        merchant_reference:
+          type: string
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        amount:
+          type: integer
+        currency:
+          type: string
+        provider:
+          $ref: '#/components/schemas/ProviderName'
+        created_at:
+          type: string
+          format: date-time
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total_items:
+          type: integer
+        total_pages:
+          type: integer
+
+    CancelPaymentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+            status:
+              type: string
+              enum: [CANCELLED]
+            cancelled_at:
+              type: string
+              format: date-time
+
+    RetryPaymentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+            status:
+              type: string
+            attempt_number:
+              type: integer
+            provider:
+              $ref: '#/components/schemas/ProviderName'
+            message:
+              type: string
+
+    ReconcilePaymentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+            previous_status:
+              $ref: '#/components/schemas/PaymentStatus'
+            current_status:
+              $ref: '#/components/schemas/PaymentStatus'
+            provider_status:
+              type: string
+            resolution:
+              type: string
+              enum: [COMPLETED, FAILED, UNCERTAIN]
+            reconciled_at:
+              type: string
+              format: date-time
+
+    WebhookResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        event_id:
+          type: string
+        processing_status:
+          type: string
+          enum: [RECEIVED, PROCESSED, DUPLICATE]
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        uptime_seconds:
+          type: integer
+
+    ReadinessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        database:
+          type: string
+        redis:
+          type: string
+
+    PaymentStatus:
+      type: string
+      enum:
+        - PENDING
+        - PROCESSING
+        - SUCCESS
+        - FAILED
+        - PENDING_RETRY
+        - PENDING_RECONCILIATION
+        - CANCELLED
+
+    ProviderName:
+      type: string
+      enum:
+        - ALPHA
+        - BETA
+        - GAMMA
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+
+  responses:
+    UnauthorizedError:
+      description: Autentikasi gagal
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFoundError:
+      description: Resource tidak ditemukan
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body tidak valid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnprocessableError:
+      description: Business rule violation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+tags:
+  - name: Payments
+    description: Operasi pembayaran untuk merchant
+  - name: Operations
+    description: Operasi internal untuk tim operations
+  - name: Webhooks
+    description: Penerimaan webhook dari provider
+  - name: System
+    description: Endpoint sistem (health, readiness, metrics)
+        status:
+          type: string
+          enum: [SUCCESS, FAILED, TIMEOUT]
+        attempt_type:
+          type: string
+          enum: [INITIAL, RETRY, RECONCILIATION, FAILOVER]
+        duration_ms:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    WebhookEventInfo:
+      type: object
+      properties:
+        event_id:
+          type: string
+        event_type:
+          type: string
+        verification_status:
+          type: string
+          enum: [PENDING, VALID, INVALID]
+        processing_status:
+          type: string
+          enum: [PENDING, PROCESSED, DUPLICATE, FAILED]
+        received_at:
+          type: string
+          format: date-time
+
+    SearchPaymentsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payments:
+              type: array
+              items:
+                $ref: '#/components/schemas/PaymentSummary'
+            pagination:
+              $ref: '#/components/schemas/Pagination'
+          example: "2026-09-13T10:00:05Z"
+        metadata:
+          type: object
+          description: "Data tambahan dari provider"
+          additionalProperties: true
+        Readiness check endpoint untuk Kubernetes / Docker readiness probe.
+        Mengembalikan 503 jika database atau Redis tidak tersedia.
+      tags:
+        - System
+      responses:
+        "200":
+          description: Service siap menerima traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        "503":
+          description: Service belum siap (database/Redis down)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: |
+        Menyajikan metrics Prometheus untuk observability performance,
+        error rate, dan latensi provider.
+      tags:
+        - System
+      responses:
+        "200":
+          description: Metrics dalam format Prometheus text
+          content:
+            text/plain:
+              schema:
+                type: string
+                $ref: '#/components/schemas/RetryPaymentResponse'
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "422":
+          $ref: '#/components/responses/UnprocessableError'
+
+  /api/v1/payments/{payment_id}/reconcile:
+    post:
+      operationId: reconcilePayment
+      summary: Rekonsiliasi status pembayaran
+      description: |
+        Menjalankan rekonsiliasi untuk payment dengan status tidak pasti
+        (PENDING_RECONCILIATION). Menanyakan status terbaru ke provider
+        dan memperbarui payment. Hanya untuk Operations.
+      tags:
+        - Operations
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^pay_[a-zA-Z0-9]+$"
+          example: "pay_01J8ZVX8B8"
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        "200":
+          description: Rekonsiliasi selesai
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconcilePaymentResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+          schema:
+            type: string
+            format: date-time
+          example: "2026-09-30T23:59:59Z"
+        - name: page
+          in: query
+          description: Nomor halaman
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: limit
+          in: query
+          description: Jumlah item per halaman
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+      responses:
+        "200":
+          description: Daftar pembayaran
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchPaymentsResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
