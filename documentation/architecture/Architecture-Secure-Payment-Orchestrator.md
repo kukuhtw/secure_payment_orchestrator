@@ -394,6 +394,23 @@ flowchart TB
 ```
 
 **Webhook Security Features:**
+
+1. **HMAC SHA-256** - Payload diverifikasi dengan secret key per provider
+2. **Timestamp Tolerance** - Webhook diterima hanya dalam window waktu (default ±5 menit)
+3. **Replay Protection** - Event ID unik dicek duplicate sebelum diproses
+4. **Constant-time Comparison** - Signature comparison menggunakan constant-time
+
+### 5.3 Secrets Management
+
+| Secret | Storage | Notes |
+| --- | --- | --- |
+| API Key Hash | PostgreSQL | bcrypt/argon2 hash |
+| Webhook Secret | Environment / Secret Store | Tidak di hardcode |
+| Database URL | Environment | Via Docker Compose |
+| Redis URL | Environment | Via Docker Compose |
+
+---
+
 ## 6. Reliability Architecture
 
 ### 6.1 Idempotency Strategy
@@ -464,6 +481,10 @@ Digunakan untuk mencegah race condition pada operasi concurrent:
 | --- | --- | --- | --- |
 | Create payment | `idempotency:{merchant_id}:{key}` | 30s | Mencegah duplicate create |
 | Process webhook | `webhook:{event_id}` | 10s | Mencegah duplicate processing |
+| Reconcile payment | `reconcile:{payment_id}` | 10s | Mencegah concurrent reconciliation |
+
+---
+
 ## 7. Technology Stack
 
 ### 7.1 Runtime & Framework
@@ -637,125 +658,4 @@ Dokumen ini mengacu pada:
 | Versi | Tanggal | Perubahan | Penulis |
 | --- | --- | --- | --- |
 | 1.0 | 13 September 2026 | Draft awal dokumen arsitektur | Engineering Team |
-        condition: service_started
-
-  alpha-simulator:
-    build: ./simulators/alpha
-    ports:
-      - "9091:9091"
-
-  beta-simulator:
-    build: ./simulators/beta
-    ports:
-      - "9092:9092"
-
-  gamma-simulator:
-    build: ./simulators/gamma
-    ports:
-      - "9093:9093"
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: spo
-      POSTGRES_USER: spo
-      POSTGRES_PASSWORD: spo
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spo"]
-      interval: 5s
-
-  redis:
-    image: redis:7-alpine
-```
-| Reconcile payment | `reconcile:{payment_id}` | 10s | Mencegah concurrent reconciliation |
-
-1. **HMAC SHA-256** - Payload diverifikasi dengan secret key per provider
-2. **Timestamp Tolerance** - Webhook diterima hanya dalam window waktu (default ±5 menit)
-3. **Replay Protection** - Event ID unik dicek duplicate sebelum diproses
-4. **Constant-time Comparison** - Signature comparison menggunakan constant-time
-
-### 5.3 Secrets Management
-
-| Secret | Storage | Notes |
-| --- | --- | --- |
-| API Key Hash | PostgreSQL | bcrypt/argon2 hash |
-| Webhook Secret | Environment / Secret Store | Tidak di hardcode |
-| Database URL | Environment | Via Docker Compose |
-| Redis URL | Environment | Via Docker Compose |
-    participant M as Merchant
-    participant API as API Layer
-    participant SVC as PaymentService
-    participant DOM as Domain Layer
-    participant DB as PostgreSQL
-    participant CACHE as Redis
-    participant PROV as Provider Adapter
-
-    M->>API: POST /payments (Idempotency-Key, X-API-Key)
-    API->>API: Validate API Key
-    API->>API: Check idempotency (Redis lock)
-    alt Idempotent request found
-        API->>M: Return previous payment
-    else New request
-        API->>SVC: Create payment command
-        SVC->>DOM: Validate & create Payment entity
-        SVC->>DB: Save payment (PENDING)
-        SVC->>CACHE: Release idempotency lock
-        SVC->>PROV: Select & call provider
-        PROV->>SVC: Provider response
-        SVC->>DOM: Transition to PROCESSING
-        SVC->>DB: Save attempt & update payment
-        SVC-->>API: Payment response
-        API-->>M: 201 Created (payment_url, status)
-    end
-```
-
-### 3.2 Webhook Processing Flow
-
-```mermaid
-sequenceDiagram
-    participant P as Provider
-    participant API as Webhook Handler
-    participant SVC as WebhookService
-    participant DOM as Domain Layer
-    participant SEC as Security
-    participant DB as PostgreSQL
-
-    P->>API: POST /webhooks/alpha (HMAC signature)
-    API->>SEC: Verify HMAC signature
-    alt Invalid signature
-        API->>P: 401 Unauthorized
-    else Valid signature
-        API->>SVC: Process webhook
-        SVC->>DB: Check duplicate event_id
-        alt Duplicate event
-            SVC->>DB: Mark as DUPLICATE
-            SVC-->>API: 200 OK (already processed)
-        else New event
-            SVC->>SVC: Save webhook_event (RECEIVED)
-            SVC->>DOM: Transition payment status
-            SVC->>DB: Update payment & audit log
-            SVC->>DB: Update webhook (PROCESSED)
-            SVC-->>API: 200 OK
-        end
-        API-->>P: 200 OK
-    end
-```
-
-### 3.3 Retry & Reconciliation Flow
-
-```mermaid
-flowchart TD
-    A["Payment PROCESSING"] --> B{Provider response?}
-    B -->|"Success"| C["SUCCESS"]
-    B -->|"Rejection"| D["FAILED"]
-    B -->|"Timeout / 5xx"| E{Retry eligible?}
-    E -->|"Yes, retry count < max"| F["PENDING_RETRY"]
-    F --> G["Wait (exponential backoff)"]
-    G --> A
-    E -->|"No, max retry reached"| H["PENDING_RECONCILIATION"]
-    H --> I["Query provider status"]
-    I -->|"Success"| C
-    I -->|"Failed"| D
-    I -->|"Uncertain"| J["MANUAL_REVIEW"]
-```
 
