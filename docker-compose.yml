@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  spo-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER_PORT: 8080
+      DATABASE_URL: postgres://spo:spo@postgres:5432/spo
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: info
+      WEBHOOK_SECRET_ALPHA: alpha-secret-dev
+      WEBHOOK_SECRET_BETA: beta-secret-dev
+      WEBHOOK_SECRET_GAMMA: gamma-secret-dev
+      MAX_RETRY_ATTEMPTS: 5
+      CIRCUIT_BREAKER_THRESHOLD: 5
+      CIRCUIT_BREAKER_TIMEOUT_SECONDS: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: spo
+      POSTGRES_USER: spo
+      POSTGRES_PASSWORD: spo
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
