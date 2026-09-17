@@ -46,9 +46,9 @@ karena handler API masih mengembalikan `NOT_IMPLEMENTED`.
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Business requirements | Selesai | `BRD-Secure-Payment-Orchestrator.md` |
-| Product requirements | Selesai | `PRD-Secure-Payment-Orchestrator.md` |
-| Work breakdown structure | Selesai | `WBS-Secure-Payment-Orchestrator.md` |
+| Business requirements | Selesai | `documentation/planning/BRD-Secure-Payment-Orchestrator.md` |
+| Product requirements | Selesai | `documentation/planning/PRD-Secure-Payment-Orchestrator.md` |
+| Work breakdown structure | Selesai | `documentation/planning/WBS-Secure-Payment-Orchestrator.md` |
 | Architecture document | Selesai | `documentation/architecture/Architecture-Secure-Payment-Orchestrator.md` |
 | ERD dan relational schema design | Selesai | ERD dan migration awal tersedia |
 | Threat model | Parsial | Risiko tersebar di BRD/production plan; belum ada threat-model khusus |

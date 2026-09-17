@@ -586,8 +586,8 @@ spo_payment_duration_ms_count{provider="MIDTRANS"} 128
 
 | Dokumen | Deskripsi |
 | --- | --- |
-| [BRD-Secure-Payment-Orchestrator.md](../../BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
-| [PRD-Secure-Payment-Orchestrator.md](../../PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
+| [BRD-Secure-Payment-Orchestrator.md](../planning/BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
+| [PRD-Secure-Payment-Orchestrator.md](../planning/PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
 | [ERD-Secure-Payment-Orchestrator.md](../erd/ERD-Secure-Payment-Orchestrator.md) | Entity Relationship Diagram |
 | [Architecture-Secure-Payment-Orchestrator.md](../architecture/Architecture-Secure-Payment-Orchestrator.md) | Architecture Document |
 

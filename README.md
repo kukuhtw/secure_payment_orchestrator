@@ -408,6 +408,9 @@ spo/
 ├── 📁 simulators/                   # Provider simulator services
 ├── 📁 migrations/                   # SQLx database migrations
 ├── 📁 documentation/                # Dokumentasi proyek
+│   ├── 📁 planning/                 # BRD, PRD, WBS
+│   ├── 📁 reports/                  # Progress report
+│   ├── 📁 deployment/               # Production migration plan
 │   ├── 📁 api/                      # API Contract + OpenAPI spec
 │   ├── 📁 architecture/             # Architecture document
 │   ├── 📁 database/                 # Database migrations & schema
@@ -566,13 +569,15 @@ curl -X POST http://localhost:8080/api/v1/payments/pay_01J8ZVX8B8/reconcile \
 
 | Dokumen | Lokasi | Deskripsi |
 | --- | --- | --- |
-| **BRD** | [BRD-Secure-Payment-Orchestrator.md](./BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
-| **PRD** | [PRD-Secure-Payment-Orchestrator.md](./PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
-| **WBS** | [WBS-Secure-Payment-Orchestrator.md](./WBS-Secure-Payment-Orchestrator.md) | Work Breakdown Structure |
+| **BRD** | [documentation/planning/BRD-Secure-Payment-Orchestrator.md](./documentation/planning/BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
+| **PRD** | [documentation/planning/PRD-Secure-Payment-Orchestrator.md](./documentation/planning/PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
+| **WBS** | [documentation/planning/WBS-Secure-Payment-Orchestrator.md](./documentation/planning/WBS-Secure-Payment-Orchestrator.md) | Work Breakdown Structure |
 | **API Contract** | [documentation/api/API-Contract-Secure-Payment-Orchestrator.md](./documentation/api/API-Contract-Secure-Payment-Orchestrator.md) | API endpoints detail |
 | **OpenAPI Spec** | [documentation/api/openapi.yaml](./documentation/api/openapi.yaml) | OpenAPI 3.0.3 specification |
 | **Architecture** | [documentation/architecture/Architecture-Secure-Payment-Orchestrator.md](./documentation/architecture/Architecture-Secure-Payment-Orchestrator.md) | Architecture & design decisions |
 | **ERD** | [documentation/erd/ERD-Secure-Payment-Orchestrator.md](./documentation/erd/ERD-Secure-Payment-Orchestrator.md) | Entity Relationship Diagram |
+| **Progress Report** | [documentation/reports/Progress-Report.md](./documentation/reports/Progress-Report.md) | Status audit proyek |
+| **Migration Plan** | [documentation/deployment/Production-Migration-Plan.md](./documentation/deployment/Production-Migration-Plan.md) | Production migration plan |
 
 ---
 

@@ -711,9 +711,9 @@ Dokumen ini mengacu pada:
 
 | Dokumen | Deskripsi |
 | --- | --- |
-| [BRD-Secure-Payment-Orchestrator.md](../../BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
-| [PRD-Secure-Payment-Orchestrator.md](../../PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
-| [WBS-Secure-Payment-Orchestrator.md](../../WBS-Secure-Payment-Orchestrator.md) | Work Breakdown Structure |
+| [BRD-Secure-Payment-Orchestrator.md](../planning/BRD-Secure-Payment-Orchestrator.md) | Business Requirements Document |
+| [PRD-Secure-Payment-Orchestrator.md](../planning/PRD-Secure-Payment-Orchestrator.md) | Product Requirements Document |
+| [WBS-Secure-Payment-Orchestrator.md](../planning/WBS-Secure-Payment-Orchestrator.md) | Work Breakdown Structure |
 | [ERD-Secure-Payment-Orchestrator.md](../erd/ERD-Secure-Payment-Orchestrator.md) | Entity Relationship Diagram |
 
 ## 11. Changelog
