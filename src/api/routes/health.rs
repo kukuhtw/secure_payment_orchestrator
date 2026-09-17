@@ -37,7 +37,12 @@ pub async fn readiness_check(
         Err(_) => "disconnected",
     };
 
-    let redis_status = match state.redis.ping().await {
+    let mut redis_conn = state.redis.clone();
+    let redis_status = match redis::Cmd::new()
+        .arg("PING")
+        .query_async::<String>(&mut redis_conn)
+        .await
+    {
         Ok(_) => "connected",
         Err(_) => "disconnected",
     };

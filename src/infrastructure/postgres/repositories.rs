@@ -2,7 +2,7 @@
 //!
 //! Semua query menggunakan parameterized query ($1, $2, ...) untuk SQL injection prevention.
 
-use crate::domain::attempt::{AttemptStatus, AttemptType, PaymentAttempt};
+use crate::domain::attempt::{PaymentAttempt, PaymentAttemptRow};
 use crate::domain::error::DomainError;
 use crate::domain::payment::Payment;
 use crate::domain::repositories::*;

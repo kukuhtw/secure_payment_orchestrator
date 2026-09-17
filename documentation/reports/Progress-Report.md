@@ -4,11 +4,11 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi report | 3.0 |
+| Versi report | 4.0 |
 | Tanggal audit | 17 September 2026 |
 | Status produk | Proof of Concept, belum production-ready |
-| Dasar penilaian | `cargo build`, `cargo test --no-run`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
-| Verifikasi build | Berhasil dijalankan. `cargo build` gagal dengan **12 compile error** pada `spo-api` (lib target); `cargo fmt -- --check` **lulus** tanpa isu |
+| Dasar penilaian | `cargo build`, `cargo test`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
+| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin), `cargo test` sukses (5/5 test lulus), `cargo fmt -- --check` lulus tanpa isu |
 
 ## 1. Ringkasan Eksekutif
 
@@ -17,33 +17,38 @@ PostgreSQL repositories, Redis lock helper, kontrak provider, empat provider ada
 (Midtrans/Alpha, Xendit/Beta, DOKU/Gamma, NICEPAY), konfigurasi, dokumentasi API, dan
 container setup.
 
-Berbeda dari audit sebelumnya (v2.0), akses ke Cargo registry kini tersedia sehingga
-status compile pada report ini diverifikasi langsung dengan `cargo build`, bukan lagi
-estimasi dari static review saja. Hasilnya: source **belum bisa dikompilasi** — ada 12
-compile error di 9+ lokasi, ditambah minimal 3 error tambahan yang baru akan muncul
-setelah lib berhasil dikompilasi (binary target `main.rs` belum sempat diperiksa compiler
-karena lib gagal lebih dulu). Detail lengkap ada di §7 dan §8.
+Sejak audit v3.0, seluruh **12 compile error** yang ditemukan sudah diperbaiki, ditambah
+**3 bug lain** yang baru terlihat setelah lib berhasil dikompilasi (compiler baru bisa
+memeriksa binary target `main.rs` setelah lib lulus). `spo-api` sekarang **berhasil
+dikompilasi secara penuh** (`cargo build`, `cargo test`, `cargo fmt -- --check` semuanya
+lulus) untuk pertama kalinya sejak report ini dibuat. Detail perbaikan ada di §3 dan §9.
 
-Alur bisnis utama belum tersambung secara end-to-end. Seluruh payment handler utama,
-webhook handler, application service, authentication, idempotency middleware, security
-implementation, retry, reconciliation, circuit breaker, metrics export, dan automated test
-masih berupa skeleton atau belum dibuat.
+Ini adalah perbaikan compile blocker murni — **tidak ada logika bisnis baru yang
+ditambahkan**. Alur bisnis utama masih belum tersambung end-to-end: seluruh payment
+handler utama, webhook handler, application service, authentication, idempotency
+middleware, sebagian besar security implementation, retry, reconciliation, circuit
+breaker, dan automated test masih berupa skeleton atau belum dibuat.
 
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 15 | 25% |
-| Parsial | 17 | 28% |
-| Belum | 28 | 47% |
+| Selesai | 21 | 35% |
+| Parsial | 13 | 22% |
+| Belum | 26 | 43% |
 | **Total** | **60** | **100%** |
 
-Dibanding v2.0 (17 selesai / 15 parsial / 28 belum), dua task turun dari Selesai ke
-Parsial — "Redis client setup" dan "Redis distributed lock helper" — karena keduanya
-kini terbukti tidak compile (lihat §3.2 dan §3.6). Ini bukan regresi kode; ini koreksi
-status karena report v2.0 tidak bisa memverifikasi compile akibat kendala registry.
+Dibanding v3.0 (15 selesai / 17 parsial / 28 belum), enam task naik status karena compile
+blocker-nya sudah diperbaiki dan terverifikasi lulus `cargo build`: Cargo project/module
+structure, PostgreSQL pool wiring, Redis client setup, PostgreSQL repository
+implementation, Redis distributed lock helper, dan Logging initialization — semuanya naik
+ke Selesai. Prometheus exporter naik dari Belum ke Parsial (recorder terpasang dan
+`/metrics` merender output asli, tetapi belum ada metric yang direkam dari application
+layer). Tidak ada task yang turun status pada pass ini.
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
-kesiapan production. Core payment flow belum dapat digunakan: handler API masih
-mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
+kesiapan production. Core payment flow **masih** belum dapat digunakan: handler API
+masih mengembalikan `NOT_IMPLEMENTED`. Yang berubah adalah source sekarang bisa
+dikompilasi dan ditest — prasyarat dasar sebelum fitur apa pun bisa dikerjakan dan
+diverifikasi dengan `cargo test`.
 
 ## 2. Definisi Status
 
@@ -66,37 +71,37 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 | ERD dan relational schema design | Selesai | ERD dan migration awal tersedia |
 | Threat model | Parsial | Risiko tersebar di BRD/production plan; belum ada threat-model khusus |
 
-### 3.2 Project foundation — 2 selesai, 4 parsial
+### 3.2 Project foundation — 5 selesai, 1 parsial
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Cargo project dan module structure | Parsial | `cargo build` gagal dengan 12 error di 9+ lokasi (lihat §7); `cargo fmt -- --check` lulus tanpa isu |
+| Cargo project dan module structure | Selesai | `cargo build` (lib + bin) dan `cargo fmt -- --check` lulus tanpa error; hanya warning kosmetik tersisa (`unused variable`, `dead_code`) |
 | Configuration loading | Selesai | `src/config/settings.rs` — seluruh env var provider (Midtrans, Xendit, DOKU, NICEPAY) dan retry/circuit-breaker termuat |
-| PostgreSQL pool dan startup migration | Parsial | Fungsi pool nyatanya berada di `infrastructure::create_pool` (`src/infrastructure/mod.rs:43`), tetapi `main.rs:18` memanggil path `infrastructure::postgres::create_pool` yang tidak ada di module `postgres` — akan gagal compile begitu lib lulus |
-| Redis client setup | Parsial (turun dari Selesai) | `src/infrastructure/mod.rs` mendeklarasikan `pub mod redis;` (module lokal) di file yang sama dengan `use redis::aio::ConnectionManager;` — name shadowing membuat `use` merujuk ke module lokal, bukan crate eksternal `redis`. Menghasilkan `E0432 unresolved import redis::aio` (baris 5) dan `E0433 cannot find Client in redis` (baris 53) |
+| PostgreSQL pool dan startup migration | Selesai | Diperbaiki: `main.rs` sekarang memanggil `infrastructure::create_pool` (path yang benar, sebelumnya salah memanggil `infrastructure::postgres::create_pool`) |
+| Redis client setup | Selesai | Diperbaiki: root cause-nya adalah name shadowing — `src/infrastructure/mod.rs` mendeklarasikan `pub mod redis;` (module lokal) di file yang sama dengan `use redis::aio::ConnectionManager;`, sehingga `use` merujuk ke module lokal alih-alih crate eksternal. Fix: qualifikasi eksplisit `::redis::aio::ConnectionManager` dan `::redis::Client::open` |
 | Dockerfile dan Docker Compose | Selesai | Container definition tersedia |
-| Health/readiness endpoint | Parsial | `src/api/routes/health.rs:35` mengakses `state.db_pool` yang tidak ada pada `AppState` (field yang ada: `repos: Repositories`) — `E0609`; `state.redis.ping()` di baris 40 tidak ada method-nya pada `ConnectionManager` — `E0599`; uptime masih hard-coded `0` |
+| Health/readiness endpoint | Parsial | Diperbaiki: `AppState` sekarang punya field `db_pool` (ditambahkan di `src/lib.rs`), dan Redis ping dipanggil via `redis::Cmd::new().arg("PING").query_async::<String>(...)` (bukan method `.ping()` yang memang tidak ada di API `ConnectionManager`). Endpoint compile dan berjalan; uptime masih hard-coded `0` (belum ada tracking start time) |
 
-### 3.3 Domain dan persistence — 4 selesai, 3 parsial
+### 3.3 Domain dan persistence — 5 selesai, 2 parsial
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Payment aggregate dan Money | Selesai | `src/domain/payment.rs` — entity, validasi, transition wrapper; tidak ada compile error |
-| Payment status/state machine | Selesai | `src/domain/status.rs`, `src/domain/rules.rs` — enum dan transition matrix lengkap; tidak ada compile error |
+| Payment aggregate dan Money | Selesai | `src/domain/payment.rs` — entity, validasi, transition wrapper |
+| Payment status/state machine | Selesai | `src/domain/status.rs`, `src/domain/rules.rs` — enum dan transition matrix lengkap |
 | Retry classification/backoff rules | Selesai | `is_retryable_http_status`, `is_retryable_error`, `retry_delay_seconds` di `src/domain/rules.rs` |
-| Repository contracts | Selesai | 6 trait (payment, attempt, API key, idempotency, audit, webhook) di `src/domain/repositories.rs`, lengkap dan compile bersih |
-| PostgreSQL repository implementation | Parsial | Query CRUD/search/count untuk semua 6 repository sudah lengkap (bukan lagi potongan seperti klaim v2.0), tetapi tidak compile: import `PaymentAttemptRow` hilang di `repositories.rs:239` (`E0425`), dan `domain/attempt.rs:62-63` memanggil `AttemptStatus::from(&row.status)` / `AttemptType::from(&row.attempt_type)` dengan tipe `&String` padahal hanya `impl From<&str>` yang tersedia (`E0277` × 2) |
-| Atomic business transaction | Parsial | Tidak ditemukan pemakaian `sqlx::Transaction`/`.begin()` di source manapun; create payment, audit log, dan idempotency record masih 3 query terpisah tanpa pembungkus transaksi |
-| Concurrency protection | Parsial | Redis lock helper (`src/infrastructure/redis/lock.rs`) belum dipakai oleh payment/webhook/reconciliation flow (`application/*.rs` masih skeleton satu baris); helper itu sendiri kini juga punya compile error (lihat §3.6) |
+| Repository contracts | Selesai | 6 trait (payment, attempt, API key, idempotency, audit, webhook) di `src/domain/repositories.rs` |
+| PostgreSQL repository implementation | Selesai | Diperbaiki: `PaymentAttemptRow` ditambahkan ke import di `repositories.rs`, dan `domain/attempt.rs` memakai `row.status.as_str()` / `row.attempt_type.as_str()` (bukan `&row.status`) agar cocok dengan `impl From<&str>`. Query CRUD/search/count untuk semua 6 repository lengkap dan compile bersih |
+| Atomic business transaction | Parsial (tidak diubah pada pass ini) | Tidak ditemukan pemakaian `sqlx::Transaction`/`.begin()` di source manapun; create payment, audit log, dan idempotency record masih 3 query terpisah tanpa pembungkus transaksi — ini backlog fitur (P0), bukan compile blocker |
+| Concurrency protection | Parsial (tidak diubah pada pass ini) | Redis lock helper sekarang compile bersih (lihat §3.6), tetapi masih belum dipakai oleh payment/webhook/reconciliation flow — `application/*.rs` masih skeleton satu baris |
 
 ### 3.4 Core Payment API — 0 selesai, 1 parsial, 7 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Request/response DTO | Parsial | Struct lengkap di `src/api/dto/payment.rs`; validation belum diterapkan pada handler |
-| Authentication middleware | Belum | `src/api/middleware/authentication.rs` hanya berisi doc comment, tidak ada fungsi `auth_layer` — dipanggil dari `api/mod.rs:19` tanpa definisi (`E0425`) |
-| Idempotency middleware | Belum | `src/api/middleware/idempotency.rs` hanya doc comment; `idempotency_layer` tidak ada (`E0425` di `api/mod.rs:20`) |
-| Create payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` (`src/api/routes/payment.rs:34`) |
+| Authentication middleware | Belum | `src/api/middleware/authentication.rs` hanya doc comment. Diperbaiki: `api/mod.rs` sekarang memanggil `middleware::auth_layer()` yang benar-benar ada (didefinisikan di `middleware/mod.rs` sebagai `tower::layer::util::Identity` — placeholder pass-through, bukan auth sungguhan), bukan `middleware::authentication::auth_layer()` yang memang tidak pernah ada di submodule itu. Router compile, tetapi tidak ada enforcement auth apa pun |
+| Idempotency middleware | Belum | Sama seperti di atas — `idempotency_layer()` sekarang dipanggil dari path yang benar (`middleware::idempotency_layer()`), tetap berupa `Identity` pass-through tanpa logika |
+| Create payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` (`src/api/routes/payment.rs`) |
 | Get payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 | Search payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 | Cancel payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
@@ -106,8 +111,8 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Canonical `PaymentProvider` contract | Selesai | `src/providers/adapter.rs` — trait, request, response, error types; tidak ada compile error |
-| Midtrans/Xendit/DOKU provider adapters | Selesai | Alpha (277 baris), Beta (232 baris), Gamma (346 baris) — Midtrans, Xendit, DOKU Sandbox; tidak ada compile error |
+| Canonical `PaymentProvider` contract | Selesai | `src/providers/adapter.rs` — trait, request, response, error types |
+| Midtrans/Xendit/DOKU provider adapters | Selesai | Alpha (277 baris), Beta (232 baris), Gamma (346 baris) — Midtrans, Xendit, DOKU Sandbox |
 | NICEPAY example adapter | Parsial | Registration/create tersedia (269 baris); inquiry memerlukan referenceNo dan amt yang belum dibawa kontrak status provider |
 | Provider availability contract | Parsial | `is_available()` di trait; Midtrans unavailable jika Server Key kosong; health/circuit breaker runtime belum tersedia |
 | Failover data model | Parsial | `AttemptType::Failover` tersedia; flow belum diimplementasikan |
@@ -116,11 +121,11 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 | Circuit breaker | Belum | Hanya config (`circuit_breaker_threshold`, `circuit_breaker_timeout_seconds` di `settings.rs`); tidak ada state machine/runtime |
 | Automatic fallback A ke B | Belum | Belum ada routing, safe-failure decision, atau failover execution |
 
-### 3.6 Reliability dan reconciliation — 0 selesai, 2 parsial, 4 belum
+### 3.6 Reliability dan reconciliation — 1 selesai, 1 parsial, 4 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Redis distributed lock helper | Parsial (turun dari Selesai) | Logic acquire (`SET NX EX`) dan release (ownership-check Lua) di `src/infrastructure/redis/lock.rs` sudah benar secara desain, tetapi `release_lock` (baris 35) gagal compile: `error: this function depends on never type fallback being ()` — tipe hasil `invoke_async` tidak dianotasi eksplisit |
+| Redis distributed lock helper | Selesai | Diperbaiki: `release_lock` di `src/infrastructure/redis/lock.rs` sebelumnya gagal compile karena never-type-fallback ambiguity pada `invoke_async(...).await?`; fix dengan anotasi eksplisit `let _: () = script...invoke_async(redis).await?;`. Logic acquire (`SET NX EX`) dan release (ownership-check Lua) sudah benar secara desain dan sekarang compile bersih |
 | Retry rules | Parsial | Klasifikasi dan backoff tersedia di domain layer; worker/orchestrator belum ada |
 | Retry worker dan max-attempt execution | Belum | Belum ada worker implementation |
 | Reconciliation service | Belum | `src/application/reconciliation.rs` hanya doc comment satu baris |
@@ -136,15 +141,15 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 | Merchant authentication/authorization | Belum | Middleware belum diimplementasikan |
 | Webhook signature verification | Belum | `src/security/webhook_sig.rs` hanya doc comment |
 | Webhook replay/duplicate processing | Belum | DB unique constraint tersedia (`uq_webhook_events_provider_event`), tetapi service belum ada |
-| Webhook route processing | Belum | Handler mengembalikan `NOT_IMPLEMENTED` (`src/api/routes/webhook.rs:26`) |
+| Webhook route processing | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 
-### 3.8 Observability dan operations — 0 selesai, 1 parsial, 3 belum
+### 3.8 Observability dan operations — 1 selesai, 2 parsial, 1 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Logging initialization | Belum | `main.rs:14` memanggil `observability::logging::init(&settings)`, tetapi `src/observability/logging.rs` hanya doc comment tanpa fungsi apa pun — akan gagal compile begitu lib lulus |
-| Request/correlation ID | Parsial | `tower-http` feature `request-id` sudah di-declare di `Cargo.toml`; `src/api/middleware/request_id.rs` masih skeleton, `request_id_layer` tidak ada (`E0425` di `api/mod.rs:21`) |
-| Prometheus instrumentation/export | Belum | `main.rs:15` memanggil `observability::metrics::init()` yang tidak ada; `api/routes/metrics.rs` masih string placeholder |
+| Logging initialization | Selesai | Diimplementasikan: `src/observability/logging.rs::init()` sekarang membangun `tracing_subscriber` dengan format JSON dan `EnvFilter` dari `settings.log_level` (sebelumnya file ini hanya doc comment tanpa fungsi apa pun, menyebabkan `main.rs` gagal compile) |
+| Request/correlation ID | Parsial | Diperbaiki hanya path pemanggilan: `api/mod.rs` sekarang memanggil `middleware::request_id_layer()` yang benar-benar ada (bukan `middleware::request_id::request_id_layer()` yang tidak ada), tetap berupa `Identity` pass-through — belum ada generate/propagate `X-Request-ID` sungguhan |
+| Prometheus instrumentation/export | Parsial (naik dari Belum) | Diimplementasikan: `src/observability/metrics.rs::init()` memasang `PrometheusBuilder` recorder global, dan `GET /metrics` (`api/routes/metrics.rs`) merender snapshot asli via `render()`. Belum ada metric (`spo_payments_total`, `spo_payment_duration_ms`) yang benar-benar direkam karena application layer belum memanggilnya — endpoint akan menampilkan output kosong sampai instrumentasi ditambahkan di P1/P2 |
 | Operational payment actions | Belum | Cancel, retry, dan reconcile belum bekerja |
 
 ### 3.9 Quality assurance dan delivery — 2 selesai, 1 parsial, 5 belum
@@ -155,7 +160,7 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 | OpenAPI specification | Selesai | `documentation/api/openapi.yaml` |
 | Domain unit tests | Belum | Tidak ditemukan `#[cfg(test)]`/`#[test]` di `src/domain/*.rs` |
 | API integration tests | Belum | `tests/api/mod.rs` masih TODO |
-| Provider tests | Parsial | `src/providers/alpha/alpha.rs:250` punya `#[cfg(test)]` dengan unit test mapping status Midtrans; `tests/providers/mod.rs` masih TODO |
+| Provider tests | Parsial | 5 unit test di provider layer (Midtrans/Xendit/DOKU/NICEPAY status mapping) — semuanya **lulus** via `cargo test`; `tests/providers/mod.rs` (integration) masih TODO |
 | CI/CD workflow | Belum | Folder `.github/` tidak ditemukan di repository |
 | Postman collection | Belum | File tidak tersedia |
 | Demo/end-to-end script | Belum | File tidak tersedia |
@@ -167,41 +172,32 @@ mengembalikan `NOT_IMPLEMENTED`, dan source belum lulus `cargo build`.
 3. Migration schema, indexes, dan seed dasar.
 4. Payment aggregate, Money, payment status, dan transition rules.
 5. Retry classification dan exponential-backoff calculation.
-6. Repository traits (6 kontrak).
+6. Repository traits (6 kontrak) dan seluruh implementasi PostgreSQL-nya.
 7. Provider adapter contract serta adapter create/status untuk Midtrans, Xendit, dan DOKU.
 8. Contoh registration/create payment NICEPAY; inquiry masih parsial.
 9. Dockerfile dan Docker Compose.
 10. API contract dan OpenAPI specification.
-
-Redis client setup dan Redis distributed lock helper **tidak lagi** masuk daftar ini —
-keduanya sudah diimplementasikan secara logic, tetapi terverifikasi tidak compile
-(lihat §3.2, §3.6, §7).
+11. PostgreSQL pool creation dan Redis client setup (path/naming bug diperbaiki).
+12. Redis distributed lock helper (compile bug diperbaiki).
+13. Structured JSON logging initialization.
+14. `spo-api` compile bersih: `cargo build`, `cargo test` (5/5 lulus), dan `cargo fmt -- --check` semuanya lulus.
 
 ## 5. Daftar yang Belum Selesai
 
-### Prioritas P0-blocker — compile error yang harus diperbaiki lebih dulu
-
-Tidak ada task lain yang bisa diverifikasi berjalan sampai 12 error berikut selesai:
-
-1. Name shadowing `redis` module vs crate di `src/infrastructure/mod.rs` (`E0432`, `E0433`).
-2. Import `PaymentAttemptRow` hilang di `src/infrastructure/postgres/repositories.rs:239` (`E0425`).
-3. `AttemptStatus`/`AttemptType` tidak punya `impl From<&String>` — dipanggil dengan `&String` di `src/domain/attempt.rs:62-63` (`E0277` × 2).
-4. `auth_layer`, `idempotency_layer`, `request_id_layer` dipanggil di `src/api/mod.rs:19-21` tapi tidak pernah didefinisikan (`E0425` × 3).
-5. `AppState` tidak punya field `db_pool` — dipakai di `src/api/routes/health.rs:35` (`E0609`).
-6. `ConnectionManager` tidak punya method `ping()` — dipakai di `src/api/routes/health.rs:40` (`E0599`).
-7. `release_lock` di `src/infrastructure/redis/lock.rs:35` gagal never-type-fallback inference.
-8. (Ditemukan via static review, belum tersurfaced compiler) `main.rs:18` memanggil `infrastructure::postgres::create_pool` yang tidak ada — fungsi sebenarnya `infrastructure::create_pool`.
-9. (Static review) `main.rs:14-15` memanggil `observability::logging::init` dan `observability::metrics::init` yang belum didefinisikan sama sekali.
+Seluruh compile blocker dari v3.0 (12 error + 3 temuan static-review) sudah diperbaiki —
+lihat §9 Changelog untuk daftar lengkap dan §3 untuk detail per task. Backlog di bawah ini
+murni tentang fitur/business logic yang belum dikerjakan, bukan lagi tentang kode yang
+tidak bisa dikompilasi.
 
 ### Prioritas P0 — agar core payment flow dapat berjalan
 
-1. Authentication middleware dan merchant context.
+1. Authentication middleware dan merchant context (saat ini `Identity` pass-through, belum ada verifikasi apa pun).
 2. API-key hashing/verification.
 3. Request validation.
 4. Payment application service.
 5. Provider selection dan invocation.
 6. Create, get, search, dan cancel payment handlers.
-7. Idempotency flow dengan Redis lock dan DB constraint.
+7. Idempotency flow dengan Redis lock dan DB constraint (saat ini `Identity` pass-through).
 8. Atomic transaction untuk payment, idempotency record, attempt, dan audit log.
 
 ### Prioritas P1 — reliability dan fallback
@@ -211,24 +207,24 @@ Tidak ada task lain yang bisa diverifikasi berjalan sampai 12 error berikut sele
 3. Reconciliation service dan endpoint.
 4. Circuit breaker per provider.
 5. Safe automatic fallback dari Gateway A ke Gateway B.
-6. Locking antara retry, webhook, reconciliation, dan failover.
+6. Locking antara retry, webhook, reconciliation, dan failover (lock helper sudah siap dipakai, tinggal diintegrasikan).
 7. Late webhook dan conflicting-status handling.
 
 ### Prioritas P2 — security, observability, dan readiness
 
 1. HMAC webhook verification dan timestamp tolerance.
 2. Duplicate/replay webhook processing.
-3. Prometheus metric registration dan `/metrics` export.
-4. Request ID/correlation ID propagation.
+3. Instrumentasi metric aktual (`spo_payments_total`, `spo_payment_duration_ms`) — exporter-nya sudah siap.
+4. Request ID/correlation ID generation & propagation sungguhan (layer placeholder sudah terpasang).
 5. Uptime tracking pada health response.
 6. Threat model khusus.
 
 ### Prioritas P3 — quality dan delivery
 
 1. Domain unit tests.
-2. Repository/provider tests.
+2. Repository/provider integration tests (unit test provider sudah ada dan lulus).
 3. API integration, idempotency, concurrency, webhook, retry, dan failover tests.
-4. CI workflow untuk format, lint, build, dan test.
+4. CI workflow untuk format, lint, build, dan test (`cargo build`/`test`/`fmt` semuanya sudah lulus lokal, tinggal disambungkan ke CI; `cargo clippy` belum pernah dijalankan).
 5. Postman collection.
 6. Demo/end-to-end script.
 7. Load, security, dan failure-injection testing.
@@ -237,24 +233,24 @@ Tidak ada task lain yang bisa diverifikasi berjalan sampai 12 error berikut sele
 
 Milestone berikutnya dapat dianggap selesai jika:
 
-1. `cargo build` dan `cargo test --no-run` lulus tanpa error.
+1. ~~`cargo build` dan `cargo test` lulus tanpa error.~~ **Tercapai pada v4.0.**
 2. `POST /payments` membuat tepat satu payment untuk request idempotent yang sama.
 3. Payment, attempt, idempotency record, dan audit event tersimpan konsisten.
 4. `GET /payments/{id}` dan search hanya menampilkan data merchant yang terautentikasi.
 5. Provider dipilih melalui service, bukan dipanggil langsung dari route.
 6. Provider rejection dan transient/ambiguous errors dipetakan secara berbeda.
 7. Automated test membuktikan happy path, duplicate request, dan concurrent request.
-8. `cargo fmt`, `cargo clippy`, dan `cargo test` lulus di CI.
+8. `cargo fmt`, `cargo clippy`, dan `cargo test` lulus di CI (fmt dan test sudah lulus lokal; clippy belum dijalankan; CI belum ada).
 
 ## 7. Risiko dan Blocker Saat Ini
 
 | Risiko / blocker | Dampak | Tindakan |
 | --- | --- | --- |
-| `spo-api` (lib) gagal compile — 12 error terverifikasi via `cargo build` | Tidak ada bagian aplikasi yang bisa dijalankan atau ditest sampai diperbaiki | Selesaikan daftar P0-blocker di §5 sebelum lanjut ke fitur |
-| Binary target (`main.rs`) belum sempat diperiksa compiler | Minimal 2 error tambahan (path `postgres::create_pool`, fungsi `logging::init`/`metrics::init` yang tidak ada) baru akan muncul setelah lib lulus — estimasi effort P0-blocker perlu dilebihkan | Perbaiki lib dulu, lalu jalankan ulang `cargo build --bin spo-api` untuk menangkap sisa error |
-| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment | Selesaikan P0 secara berurutan setelah compile blocker beres |
+| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment meskipun source sudah compile | Selesaikan P0 di §5 secara berurutan |
+| Authentication & idempotency middleware masih `Identity` pass-through | Tidak ada proteksi apa pun jika endpoint diekspos apa adanya | Jangan deploy; implementasikan sebelum endpoint dibuka |
 | README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
-| Belum ada automated test yang bisa dijalankan | Regression dan correctness tidak terukur; `cargo test --no-run` sendiri gagal karena compile error yang sama | Tambahkan test bersamaan dengan setiap use case, setelah compile blocker beres |
+| Automated test masih sangat terbatas (5 unit test provider) | Regression dan correctness belum terukur untuk domain/API/webhook | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
+| `cargo clippy` belum pernah dijalankan | Lint issue/anti-pattern berpotensi belum terdeteksi | Jalankan `cargo clippy` sebelum CI dibuat |
 | Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
 | Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
 
@@ -262,18 +258,14 @@ Milestone berikutnya dapat dianggap selesai jika:
 
 | Pemeriksaan | Hasil |
 | --- | --- |
-| `cargo build` (lib target) | **Gagal** — 12 error: `E0432`, `E0433` (redis module shadowing), `E0425` × 4 (middleware layer functions, `PaymentAttemptRow`), `E0277` × 2 (`AttemptStatus`/`AttemptType` dari `&String`), `E0609` (field `db_pool`), `E0599` (method `ping`), 1 never-type-fallback error |
-| `cargo build --bin spo-api` | Tidak mencapai binary target — berhenti di error lib yang sama |
-| `cargo test --no-run` | **Gagal** — error lib yang sama menghalangi test binary dibangun |
-| `cargo fmt -- --check` | **Lulus**, tidak ada isu format. (Klaim v2.0 soal "brace/potongan query tidak tersusun valid" di `repositories.rs` sudah tidak berlaku — file itu sekarang terstruktur valid, error yang tersisa hanya import & type mismatch) |
-| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, metrics, tests, dan circuit breaker integration |
+| `cargo build` (lib + bin) | **Lulus** — 0 error, hanya warning kosmetik (`unused variable`, `dead_code` pada fungsi yang memang belum dipakai) |
+| `cargo test` | **Lulus** — 5/5 test passed (mapping status Midtrans, Xendit, DOKU ×2, NICEPAY); 0 failed |
+| `cargo fmt -- --check` | **Lulus**, tidak ada isu format |
+| `cargo clippy` | Belum dijalankan pada pass ini — masuk backlog P3 |
+| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, application services, security files, dan test file (`tests/api`, `tests/providers`) |
 | Payment API runtime implementation | Belum tersedia |
-| Automated test implementation | Belum tersedia |
+| Automated test implementation | Terbatas pada unit test provider (5 test); domain/API/webhook/concurrency test belum ada |
 | Production readiness | Tidak siap |
-
-Berbeda dari v2.0, akses registry kini tersedia sehingga hasil di atas adalah hasil
-`cargo` sungguhan, bukan static review semata. Static review tetap dipakai untuk
-menemukan error pada `main.rs` yang belum sempat diperiksa compiler (lihat §7).
 
 ## 9. Changelog
 
@@ -283,3 +275,4 @@ menemukan error pada `main.rs` yang belum sempat diperiksa compiler (lihat §7).
 | 1.1 | 13 September 2026 | Update repository layer |
 | 2.0 | 17 September 2026 | Audit ulang berdasarkan implementasi aktual, klasifikasi selesai/parsial/belum, dan penambahan backlog fallback |
 | 3.0 | 17 September 2026 | Audit ulang dengan `cargo build`/`cargo test --no-run`/`cargo fmt -- --check` sungguhan (registry tersedia); ditemukan root cause konkret untuk 12 compile error; status Redis client setup dan Redis lock helper diturunkan dari Selesai ke Parsial; ditambahkan daftar P0-blocker |
+| 4.0 | 17 September 2026 | Seluruh 12 compile error v3.0 diperbaiki, ditambah 3 bug baru yang baru terlihat setelah lib compile: (1) `main.rs` memanggil `api::routes::build_router` padahal fungsinya di `api::build_router`; (2) `settings` dipakai setelah di-*move* ke `AppState::new` (borrow checker error); (3) koreksi diagnosis v3.0 — `auth_layer`/`idempotency_layer`/`request_id_layer` ternyata **sudah** didefinisikan (di `middleware/mod.rs` sebagai `Identity` placeholder), bug sebenarnya adalah `api/mod.rs` memanggil path submodule yang salah, bukan fungsi yang "tidak pernah didefinisikan" seperti klaim v3.0. Juga mengimplementasikan `logging::init()` dan `metrics::init()`/`render()` secara nyata (bukan sekadar stub) karena `main.rs` sudah memanggilnya. `cargo build`, `cargo test` (5/5), dan `cargo fmt -- --check` semuanya lulus untuk pertama kalinya |

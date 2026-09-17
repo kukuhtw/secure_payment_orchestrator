@@ -48,7 +48,7 @@ pub async fn release_lock(
         "#,
     );
 
-    script
+    let _: () = script
         .key(lock_key)
         .arg(lock_value)
         .invoke_async(redis)

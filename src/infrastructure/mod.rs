@@ -2,7 +2,7 @@ pub mod postgres;
 pub mod redis;
 
 use crate::domain::repositories::*;
-use redis::aio::ConnectionManager;
+use ::redis::aio::ConnectionManager;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
 
 /// Create Redis connection manager.
 pub async fn create_redis_client(redis_url: &str) -> anyhow::Result<ConnectionManager> {
-    let client = redis::Client::open(redis_url)?;
+    let client = ::redis::Client::open(redis_url)?;
     let manager = ConnectionManager::new(client).await?;
     Ok(manager)
 }

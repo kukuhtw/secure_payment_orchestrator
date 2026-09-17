@@ -16,8 +16,8 @@ pub fn build_router(state: SharedState) -> Router {
             axum::routing::get(routes::health::readiness_check),
         )
         .route("/metrics", axum::routing::get(routes::metrics::get_metrics))
-        .layer(middleware::authentication::auth_layer())
-        .layer(middleware::idempotency::idempotency_layer())
-        .layer(middleware::request_id::request_id_layer())
+        .layer(middleware::auth_layer())
+        .layer(middleware::idempotency_layer())
+        .layer(middleware::request_id_layer())
         .with_state(state)
 }

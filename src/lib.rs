@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 /// Shared application state injected into all route handlers.
 pub struct AppState {
     pub repos: Repositories,
+    pub db_pool: sqlx::PgPool,
     pub redis: redis::aio::ConnectionManager,
     pub providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>>,
     pub settings: config::settings::Settings,
@@ -41,7 +42,8 @@ impl AppState {
         settings: config::settings::Settings,
     ) -> Self {
         Self {
-            repos: Repositories::new(db_pool),
+            repos: Repositories::new(db_pool.clone()),
+            db_pool,
             redis,
             providers: Arc::new(RwLock::new(providers)),
             settings,

@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     spo_api::observability::metrics::init()?;
 
     // 3. Initialize database pool
-    let db_pool = spo_api::infrastructure::postgres::create_pool(&settings.database_url).await?;
+    let db_pool = spo_api::infrastructure::create_pool(&settings.database_url).await?;
 
     // 4. Initialize Redis connection
     let redis_client = spo_api::infrastructure::create_redis_client(&settings.redis_url).await?;
@@ -25,15 +25,16 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Build provider adapters
     let providers = spo_api::providers::build_providers(&settings)?;
+    let server_port = settings.server_port;
 
     // 7. Build application state
     let state = spo_api::AppState::new(db_pool, redis_client, providers, settings);
 
     // 8. Build router
-    let app = spo_api::api::routes::build_router(Arc::new(state));
+    let app = spo_api::api::build_router(Arc::new(state));
 
     // 9. Start server
-    let addr = format!("0.0.0.0:{}", settings.server_port);
+    let addr = format!("0.0.0.0:{}", server_port);
     tracing::info!("Starting server on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
