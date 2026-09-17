@@ -10,9 +10,18 @@ services:
       DATABASE_URL: postgres://spo:spo@postgres:5432/spo
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: info
-      WEBHOOK_SECRET_ALPHA: alpha-secret-dev
-      WEBHOOK_SECRET_BETA: beta-secret-dev
-      WEBHOOK_SECRET_GAMMA: gamma-secret-dev
+      DOKU_CLIENT_ID: ${DOKU_CLIENT_ID:-}
+      DOKU_SECRET_KEY: ${DOKU_SECRET_KEY:-}
+      DOKU_BASE_URL: https://api-sandbox.doku.com
+      DOKU_TIMEOUT_SECONDS: 10
+      MIDTRANS_SERVER_KEY: ${MIDTRANS_SERVER_KEY:-}
+      MIDTRANS_SNAP_BASE_URL: https://app.sandbox.midtrans.com
+      MIDTRANS_CORE_BASE_URL: https://api.sandbox.midtrans.com
+      MIDTRANS_TIMEOUT_SECONDS: 10
+      XENDIT_SECRET_KEY: ${XENDIT_SECRET_KEY:-}
+      XENDIT_CALLBACK_TOKEN: ${XENDIT_CALLBACK_TOKEN:-}
+      XENDIT_BASE_URL: https://api.xendit.co
+      XENDIT_TIMEOUT_SECONDS: 10
       MAX_RETRY_ATTEMPTS: 5
       CIRCUIT_BREAKER_THRESHOLD: 5
       CIRCUIT_BREAKER_TIMEOUT_SECONDS: 30

@@ -92,6 +92,7 @@ pub struct PaginatedResult<T> {
     pub total: i64,
     pub page: i64,
     pub limit: i64,
+}
 // ─── Payment Attempt ────────────────────────────────────
 
 #[async_trait]
@@ -172,8 +173,6 @@ pub trait WebhookEventRepository: Send + Sync {
     async fn find_by_event_id(&self, provider: &str, event_id: &str) -> Result<Option<WebhookEventRow>, DomainError>;
     async fn update_processing_status(&self, id: Uuid, status: &str) -> Result<(), DomainError>;
 }
-}
-
 #[async_trait]
 pub trait PaymentRepository: Send + Sync {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError>;

@@ -1,348 +1,250 @@
-# Progress Report & Development Plan
+# Task Progress Report
 
 ## Secure Payment Orchestrator
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi | 1.1 |
-| Tanggal | 13 September 2026 |
-| Total WBS | 30 hari kerja |
-| Hari Berjalan | ~5 hari (sampai akhir Repository Layer) |
-| Status | **Fase 3: Domain & Persistence — 85% (sebelumnya 45%)** |
+| Versi report | 2.0 |
+| Tanggal audit | 17 September 2026 |
+| Status produk | Proof of Concept, belum production-ready |
+| Dasar penilaian | Pemeriksaan source code, migration, konfigurasi, dokumentasi, dan test |
+| Verifikasi build | Belum berhasil dijalankan karena akses Cargo registry gagal (SSL environment) |
 
----
+## 1. Ringkasan Eksekutif
 
-## 1. Ringkasan Progress Keseluruhan
+Fondasi proyek sudah tersedia: struktur aplikasi Rust, domain model, state machine,
+PostgreSQL repositories, Redis lock helper, kontrak provider, tiga provider adapter,
+konfigurasi, dokumentasi API, dan container setup.
 
-| Kategori | Total | Selesai | Progress | Belum |
-| --- | ---: | ---: | ---: | ---: |
-| **Dokumentasi** | 8 dokumen | 8 ✅ | 0 | 0 |
-| **Source Code (total files)** | 56 files | 56 ✅ | — | — |
-| **Domain Logic (full impl)** | 5 files | 5 ✅ | 0 | 0 |
-| **Repository Layer (full impl)** | 6 traits + 6 impl | 12 ✅ | 17 SQL queries | 0 |
-| **Application Layer (impl)** | 6 files | 0 | 0 | 6 ❌ |
-| **API Routes (impl)** | 4 files | 1 ✅ | 0 | 3 ❌ |
-| **Middleware (impl)** | 4 files | 0 | 0 | 4 ❌ |
-| **Security (impl)** | 4 files | 0 | 0 | 4 ❌ |
-| **Tests** | 2 files | 0 | 0 | 2 ❌ |
-| **CI/CD** | — | 0 | 0 | ❌ |
+Alur bisnis utama belum tersambung secara end-to-end. Seluruh payment handler utama,
+webhook handler, application service, authentication, idempotency middleware, security
+implementation, retry, reconciliation, circuit breaker, metrics export, dan automated test
+masih berupa skeleton atau belum dibuat.
 
----
+| Status | Jumlah task | Persentase |
+| --- | ---: | ---: |
+| Selesai | 17 | 29% |
+| Parsial | 14 | 24% |
+| Belum | 28 | 47% |
+| **Total** | **59** | **100%** |
 
-## 2. WBS Progress per Workstream
+Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
+kesiapan production. Walaupun sebagian fondasi tersedia, core payment flow belum dapat digunakan
+karena handler API masih mengembalikan `NOT_IMPLEMENTED`.
 
-### ✅ 1.0 — Inisiasi dan Desain (3 hari) — **SELESAI 92%**
+## 2. Definisi Status
 
-| ID | Task | Status | Output |
-| --- | --- | --- | --- |
-| 1.1 | Scope, persona, success metrics | ✅ | BRD, PRD |
-| 1.2 | Status dan transition matrix | ✅ | State diagram |
-| 1.3 | Logical architecture dan modules | ✅ | Architecture doc |
-| 1.4 | Data model dan constraints | ✅ | ERD, migration SQL |
-| 1.5 | Error taxonomy dan retry | ✅ | Error codes, domain rules |
-| 1.6 | Threat model awal | ❌ | Belum dibuat |
-
-### ✅ 2.0 — Project Foundation (3 hari) — **SELESAI 95%**
-
-| ID | Task | Status | Output |
-| --- | --- | --- | --- |
-| 2.1 | Cargo project + module structure | ✅ | `Cargo.toml`, 54 file |
-| 2.2 | Axum, Tokio, Serde, config | ✅ | Dependencies siap |
-| 2.3 | Error response + request ID | ✅ | `api/dto/error.rs` |
-| 2.4 | Dockerfile + Compose | ✅ | `Dockerfile`, `docker-compose.yml` |
-| 2.5 | PostgreSQL, Redis, migrations | ✅ | Migration SQL (9 tabel) |
-| 2.6 | Health check, readiness | ✅ | `routes/health.rs` |
-
-### ✅ 3.0 — Domain & Persistence (4 hari) — **85%** ▲
-
-| ID | Task | Status | Output |
-| --- | --- | --- | --- |
-| 3.1 | Entity Payment, Money, Status | ✅ **Lengkap** | `payment.rs`, `status.rs` |
-| 3.2 | Transition rules | ✅ **Lengkap** | `rules.rs` — 10 transitions |
-| 3.3-3.4 | Migrations (all tables) | ✅ | 9 tabel + indexes + seed |
-| 3.5 | Repository traits | ✅ **Lengkap** | `domain/repositories.rs` — 6 trait + row types |
-| 3.6 | SQLx repositories | ✅ **Lengkap** | `infrastructure/postgres/repositories.rs` — 17 queries |
-| 3.7 | Transaction + concurrency guard | ❌ | Belum dibuat |
-
-### 🔶 4.0 — Core Payment API (4 hari) — **15%**
-
-| ID | Task | Status |
-| --- | --- | --- |
-| 4.1 | Auth middleware | ❌ Stub |
-| 4.2 | Request validation | 🔶 Partial (DTO siap) |
-| 4.3 | Create payment use case | ❌ Stub |
-| 4.4 | Idempotency | ❌ Stub |
-| 4.5-4.7 | Get, Search, Cancel endpoints | ❌ Stub |
-| 4.8 | Audit logging | ❌ Stub |
-
-### ✅ 5.0 — Provider Integration (4 hari) — **SELESAI 90%**
-
-| ID | Task | Status |
-| --- | --- | --- |
-| 5.1 | Provider trait | ✅ `adapter.rs` — trait + error types |
-| 5.2-5.4 | Alpha, Beta, Gamma simulators | ✅ 3 simulator (delay 100/150/200ms) |
-## 3. Status Implementasi per Modul
-
-### 3.1 Sudah Diimplementasi Penuh ✅
-
-| Modul | File | Baris | Fungsi |
-| --- | ---: | --- | --- |
-| **Domain Payment** | `domain/payment.rs` | 83 | Entity, Money validation, `transition_to()`, `is_owner()` |
-| **Domain Status** | `domain/status.rs` | 68 | `PaymentStatus` enum, `is_final()`, `TryFrom`, `Display` |
-| **Domain Rules** | `domain/rules.rs` | 69 | `validate_transition()` (10 rules), `is_retryable()`, `retry_delay_seconds()` |
-| **Domain Error** | `domain/error.rs` | 37 | `DomainError` enum — 6 variants |
-| **Domain Repositories** | `domain/repositories.rs` | 210 | **6 trait** + 10 row struct dengan `sqlx::FromRow` |
-| **Payment Repository** | `infrastructure/.../repositories.rs` | 340 | **4 method**: create, get, update_status, search (+count) |
-| **API Key Repository** | sama | — | **2 method**: find_by_key_prefix, get_merchant |
-| **Attempt Repository** | sama | — | **3 method**: save, get_by_payment_id, count_attempts |
-| **Idempotency Repository** | sama | — | **2 method**: find_by_key, save |
-| **AuditLog Repository** | sama | — | **2 method**: log, get_by_payment_id |
-| **Webhook Repository** | sama | — | **3 method**: save, find_by_event_id, update_status |
-| **Redis Lock** | `infrastructure/redis/lock.rs` | 54 | `acquire_lock()`, `release_lock()` (Lua script), `generate_lock_value()` |
-| **Provider Trait** | `providers/adapter.rs` | 58 | `PaymentProvider` trait + canonical types |
-| **Alpha/Beta/Gamma** | 3 files | 45-51 | Simulator dengan delay response |
-| **Error DTO** | `api/dto/error.rs` | 94 | `ApiError` — 7 factory methods + `IntoResponse` |
-| **Payment DTO** | `api/dto/payment.rs` | 113 | 13 structs request/response |
-| **Health Route** | `api/routes/health.rs` | 51 | Health + Readiness dengan DB/Redis check |
-| **Settings** | `config/settings.rs` | 67 | Load dari env vars + defaults |
-| **DB Migration** | `20260913_001_initial_schema.sql` | 165 | 9 tabel + indexes + constraints + seed |
-
-### 3.2 Berupa Stub / Skeleton 🔶
-
-| Modul | File | Baris | Keterangan |
-| --- | ---: | --- | --- |
-| `api/routes/payment.rs` | 83 | 6 handler stub — TODO implement |
-| `api/routes/webhook.rs` | 23 | Stub — TODO verifikasi + proses |
-| `api/middleware/*` | 3 files | 5-7 lines masing-masing |
-| `application/*` | 6 files | 5-15 lines masing-masing |
-| `infrastructure/postgres/repositories.rs` | 11 | Hanya `ping()` |
-| `security/*` | 3 files | 3-5 lines masing-masing |
-| `observability/*` | 2 files | 4-5 lines masing-masing |
-
-### 3.3 Belum Dibuat ❌
-
-| Item | Keterangan |
+| Status | Arti |
 | --- | --- |
-| Postman collection | Belum ada file |
-| Demo script | Belum ada |
-| CI/CD config | Belum ada `.github/workflows/` |
-| Unit tests | Belum ada di `src/domain/*.rs` |
-| Integration tests | Stub di `tests/` |
+| Selesai | Implementasi utama tersedia di source code; tetap memerlukan pengujian karena build belum terverifikasi |
+| Parsial | Kontrak, model, atau helper tersedia, tetapi belum terhubung end-to-end |
+| Belum | Hanya komentar/skeleton, mengembalikan `NOT_IMPLEMENTED`, atau file/deliverable belum tersedia |
 
----
+## 3. Progress per Workstream
 
-## 4. Ringkasan per Milestone
+### 3.1 Inisiasi dan desain — 5 selesai, 1 parsial
 
-### M1: Core Payment (Target: Hari 13) — 🔶 75% (sebelumnya 60%)
-| ✅ | 🔶 | ❌ |
+| Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Entity + State Machine ✅ | Auth middleware (Stub) | Transaction guard |
-| Transition Rules ✅ | Create/Get/Search (Stub) | |
-| DB Migrations ✅ | Idempotency (Stub) | |
-| Provider Trait + 3 Sim ✅ | Audit (Stub) | |
-| Error DTO ✅ | | |
-| **Repository Layer ✅ (BARU)** | | |
+| Business requirements | Selesai | `BRD-Secure-Payment-Orchestrator.md` |
+| Product requirements | Selesai | `PRD-Secure-Payment-Orchestrator.md` |
+| Work breakdown structure | Selesai | `WBS-Secure-Payment-Orchestrator.md` |
+| Architecture document | Selesai | `documentation/architecture/Architecture-Secure-Payment-Orchestrator.md` |
+| ERD dan relational schema design | Selesai | ERD dan migration awal tersedia |
+| Threat model | Parsial | Risiko tersebar di BRD/production plan; belum ada threat-model khusus |
 
-### M2: Security & Reliability (Target: Hari 21) — ❌ 10%
-| ✅ | 🔶 | ❌ |
+### 3.2 Project foundation — 3 selesai, 3 parsial
+
+| Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Redis Distributed Lock ✅ | Rules siap (retry) | HMAC Webhook |
-| | Constraint siap (replay) | Webhook Processing |
-| | | Timeout + Retry + Circuit Breaker |
-| | | Reconciliation |
+| Cargo project dan module structure | Parsial | Struktur tersedia, tetapi terdapat referensi fungsi/field yang belum diimplementasikan |
+| Configuration loading | Selesai | `src/config/settings.rs` |
+| PostgreSQL pool dan startup migration | Parsial | Helper pool tersedia di `infrastructure`, tetapi `main.rs` memanggil path `postgres::create_pool` yang tidak tersedia |
+| Redis client setup | Selesai | Client/connection manager tersedia |
+| Dockerfile dan Docker Compose | Selesai | Container definition tersedia |
+| Health/readiness endpoint | Parsial | Uptime hard-coded `0`; readiness mengakses `state.db_pool` yang tidak ada pada `AppState` |
 
-### M3: Multi-Provider & Portfolio (Target: Hari 30) — 🔶 30%
-| ✅ | ❌ |
+### 3.3 Domain dan persistence — 4 selesai, 3 parsial
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Payment aggregate dan Money | Selesai | Entity dan validasi domain tersedia |
+| Payment status/state machine | Selesai | Enum dan transition validation tersedia |
+| Retry classification/backoff rules | Selesai | Helper status/error dan delay tersedia |
+| Repository contracts | Selesai | Payment, attempt, API key, idempotency, audit, webhook |
+| PostgreSQL repository implementation | Parsial | Sebagian query tersedia, tetapi file mengandung potongan query/search dan brace yang tidak tersusun valid |
+| Atomic business transaction | Parsial | Query tersedia, tetapi create payment + audit + idempotency belum dibungkus transaction end-to-end |
+| Concurrency protection | Parsial | Redis lock helper tersedia, belum dipakai oleh payment/webhook/reconciliation flow |
+
+### 3.4 Core Payment API — 0 selesai, 1 parsial, 7 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Request/response DTO | Parsial | Struct tersedia; validation belum diterapkan pada handler |
+| Authentication middleware | Belum | File hanya berisi dokumentasi/comment |
+| Idempotency middleware | Belum | File hanya berisi dokumentasi/comment |
+| Create payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Get payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Search payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Cancel payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Manual retry endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+
+### 3.5 Provider integration dan fallback — 2 selesai, 2 parsial, 4 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Canonical `PaymentProvider` contract | Selesai | Trait, request, response, dan error types tersedia |
+| Midtrans/Xendit/Gamma provider adapters | Selesai | Alpha dipetakan ke Midtrans, Beta ke Xendit test mode, dan Gamma tetap simulator |
+| Provider availability contract | Parsial | Midtrans unavailable jika Server Key kosong; health/circuit breaker runtime belum tersedia |
+| Failover data model | Parsial | `AttemptType::Failover` tersedia; flow belum diimplementasikan |
+| Provider selection by availability/priority | Belum | Application provider service masih skeleton |
+| Timeout wrapper dan response classification | Belum | Belum ada orchestration implementation |
+| Circuit breaker | Belum | Konfigurasi tersedia, state machine/runtime belum ada |
+| Automatic fallback A ke B | Belum | Belum ada routing, safe-failure decision, atau failover execution |
+
+### 3.6 Reliability dan reconciliation — 1 selesai, 1 parsial, 4 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Redis distributed lock helper | Selesai | Acquire dengan `SET NX EX`, release memakai ownership-check Lua |
+| Retry rules | Parsial | Klasifikasi dan backoff tersedia; worker/orchestrator belum ada |
+| Retry worker dan max-attempt execution | Belum | Belum ada worker implementation |
+| Reconciliation service | Belum | Application service hanya komentar/skeleton |
+| Reconciliation endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Late-webhook conflict handling | Belum | Belum ada processing implementation |
+
+### 3.7 Security dan webhook — 0 selesai, 1 parsial, 5 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Security algorithm/design | Parsial | Argon2, HMAC-SHA256, timestamp, dan constant-time intent terdokumentasi |
+| API-key hashing dan verification | Belum | Security files hanya komentar/skeleton |
+| Merchant authentication/authorization | Belum | Middleware belum diimplementasikan |
+| Webhook signature verification | Belum | File hanya komentar/skeleton |
+| Webhook replay/duplicate processing | Belum | DB unique constraint tersedia, tetapi service belum ada |
+| Webhook route processing | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+
+### 3.8 Observability dan operations — 0 selesai, 1 parsial, 3 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| Logging initialization | Belum | `main.rs` memanggil `logging::init`, tetapi module logging hanya berisi komentar |
+| Request/correlation ID | Parsial | Dependencies/router support ada; custom middleware masih skeleton |
+| Prometheus instrumentation/export | Belum | Metrics route dan metrics module belum mengimplementasikan exporter penuh |
+| Operational payment actions | Belum | Cancel, retry, dan reconcile belum bekerja |
+
+### 3.9 Quality assurance dan delivery — 2 selesai, 1 parsial, 5 belum
+
+| Task | Status | Bukti / catatan |
+| --- | --- | --- |
+| API contract | Selesai | Markdown API contract tersedia |
+| OpenAPI specification | Selesai | `documentation/api/openapi.yaml` tersedia |
+| Domain unit tests | Belum | Belum ditemukan test implementation |
+| API integration tests | Belum | `tests/api/mod.rs` masih TODO |
+| Provider tests | Parsial | Unit test mapping status Midtrans tersedia; integration/provider test suite masih TODO |
+| CI/CD workflow | Belum | `.github/workflows` tidak tersedia |
+| Postman collection | Belum | File tidak tersedia |
+| Demo/end-to-end script | Belum | File tidak tersedia |
+
+## 4. Daftar yang Sudah Selesai
+
+1. BRD, PRD, WBS, architecture, dan ERD.
+2. Configuration loader.
+3. Migration schema, indexes, dan seed dasar.
+4. Redis client setup dan distributed lock helper.
+5. Payment aggregate, Money, payment status, dan transition rules.
+6. Retry classification dan exponential-backoff calculation.
+7. Repository traits.
+8. Provider adapter contract, Midtrans Snap/status adapter, Xendit Invoice/status adapter, serta simulator Gamma.
+9. Dockerfile dan Docker Compose.
+10. API contract dan OpenAPI specification.
+
+## 5. Daftar yang Belum Selesai
+
+### Prioritas P0 — agar core payment flow dapat berjalan
+
+1. Authentication middleware dan merchant context.
+2. API-key hashing/verification.
+3. Request validation.
+4. Payment application service.
+5. Provider selection dan invocation.
+6. Create, get, search, dan cancel payment handlers.
+7. Idempotency flow dengan Redis lock dan DB constraint.
+8. Atomic transaction untuk payment, idempotency record, attempt, dan audit log.
+
+### Prioritas P1 — reliability dan fallback
+
+1. Provider timeout handling dan error classification.
+2. Retry orchestration/worker dengan bounded attempts.
+3. Reconciliation service dan endpoint.
+4. Circuit breaker per provider.
+5. Safe automatic fallback dari Gateway A ke Gateway B.
+6. Locking antara retry, webhook, reconciliation, dan failover.
+7. Late webhook dan conflicting-status handling.
+
+### Prioritas P2 — security, observability, dan readiness
+
+1. HMAC webhook verification dan timestamp tolerance.
+2. Duplicate/replay webhook processing.
+3. Prometheus metric registration dan `/metrics` export.
+4. Request ID/correlation ID propagation.
+5. Uptime tracking pada health response.
+6. Threat model khusus.
+
+### Prioritas P3 — quality dan delivery
+
+1. Domain unit tests.
+2. Repository/provider tests.
+3. API integration, idempotency, concurrency, webhook, retry, dan failover tests.
+4. CI workflow untuk format, lint, build, dan test.
+5. Postman collection.
+6. Demo/end-to-end script.
+7. Load, security, dan failure-injection testing.
+
+## 6. Acceptance Criteria Milestone Berikutnya
+
+Milestone berikutnya dapat dianggap selesai jika:
+
+1. `POST /payments` membuat tepat satu payment untuk request idempotent yang sama.
+2. Payment, attempt, idempotency record, dan audit event tersimpan konsisten.
+3. `GET /payments/{id}` dan search hanya menampilkan data merchant yang terautentikasi.
+4. Provider dipilih melalui service, bukan dipanggil langsung dari route.
+5. Provider rejection dan transient/ambiguous errors dipetakan secara berbeda.
+6. Automated test membuktikan happy path, duplicate request, dan concurrent request.
+7. `cargo fmt`, `cargo clippy`, dan `cargo test` lulus di CI.
+
+## 7. Risiko dan Blocker Saat Ini
+
+| Risiko / blocker | Dampak | Tindakan |
+| --- | --- | --- |
+| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment | Selesaikan P0 secara berurutan |
+| Referensi/runtime source tidak konsisten | Build gagal secara statis pada struktur repository; setelah itu masih berpotensi gagal pada `logging::init`, `metrics::init`, middleware layer functions, pool path, dan `state.db_pool` | Perbaiki compile blockers sebelum implementasi fitur |
+| README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
+| Belum ada automated test | Regression dan correctness tidak terukur | Tambahkan test bersamaan dengan setiap use case |
+| Build lokal belum terverifikasi | Compile error mungkin belum terdeteksi | Jalankan build pada environment dengan Cargo registry/cache yang tersedia |
+| Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
+| Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
+
+## 8. Hasil Verifikasi
+
+| Pemeriksaan | Hasil |
 | --- | --- |
-| Semua dokumentasi (8 dokumen) ✅ | Prometheus metrics |
-| README ✅ | CI/CD |
-| | Postman + Demo Script |
-| | Unit + Integration Test |
+| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, metrics, tests, dan circuit breaker integration |
+| Payment API runtime implementation | Belum tersedia |
+| Automated test implementation | Belum tersedia |
+| `cargo test --no-run` | Tidak selesai: Cargo gagal mengakses `crates.io` akibat SSL credential error pada environment |
+| `cargo fmt -- --check` | Gagal parse pada `infrastructure/postgres/repositories.rs` karena potongan query dan delimiter tidak tersusun valid |
+| Static compile review | Ditemukan pula referensi fungsi/field yang belum tersedia; source saat ini belum dapat dikompilasi |
+| Production readiness | Tidak siap |
 
----
+Kegagalan akses registry membuat hasil kompilasi belum dapat diperoleh. Terlepas dari
+kendala tersebut, static review sudah menemukan beberapa compile blocker yang perlu
+diperbaiki sebelum build dapat dinyatakan lulus.
 
-## 5. Tahapan Development ke Depan
+## 9. Changelog
 
-### Tahap 1: Implementasi Repository & Database (3 hari)
-
-```
-1.1 PaymentRepository (1 hari) — create/get/search/update/save_attempt
-1.2 ApiKeyRepository (0.5 hari) — find_by_prefix/verify
-1.3 IdempotencyRepository (0.5 hari) — find_by_key/save/check
-1.4 AuditLogRepository + WebhookRepository (1 hari)
-```
-
-### Tahap 2: Core Payment API (3 hari)
-
-```
-2.1 Auth Middleware (1 hari) — Bearer token → hash compare → merchant context
-2.2 Idempotency Middleware (1 hari) — Redis lock → request hash → check/save
-2.3 Create + Get Payment (1 hari) — Validasi → DB → Provider → Response
-2.4 Search + Audit + Webhook Route (1 hari)
-```
-
-### Tahap 3: Provider Integration & Reliability (3 hari)
-
-```
-3.1 Provider Service (1.5 hari) — Select provider, call with timeout, classify response
-3.2 Retry Worker (0.5 hari) — Exponential backoff, max attempts
-3.3 Reconciliation (0.5 hari) — Query provider for uncertain payments
-3.4 Circuit Breaker (0.5 hari) — Track failures → OPEN → HALF_OPEN → CLOSED
-```
-
-### Tahap 4: Webhook Security (2 hari)
-
-```
-4.1 HMAC Verification (1 hari) — Parse signature, constant-time compare, timestamp check
-4.2 Webhook Processing (1 hari) — Save event, check duplicate, transition status
-```
-## 6. Timeline Sisa Development
-
-```
-Minggu 1 (Hari 1-3)     ─── Tahap 1 — Repository Layer
-Minggu 1-2 (Hari 3-6)   ─── Tahap 2 — Core Payment API
-Minggu 2 (Hari 6-9)     ─── Tahap 3 — Provider & Reliability
-Minggu 2-3 (Hari 9-11)  ─── Tahap 4 — Webhook Security
-Minggu 3 (Hari 11-13)   ─── Tahap 5 — Observability
-Minggu 3-4 (Hari 13-15) ─── Tahap 6 — QA Testing
-Minggu 4 (Hari 15-17)   ─── Tahap 7 — Handover
-```
-
-**Critical Path:**
-```
-Repository → Auth Middleware → Create Payment → Provider Integration → Webhook
-    ↑3 hari↑       ↑1 hari↑        ↑1 hari↑         ↑3 hari↑          ↑2 hari↑
-```
-
----
-
-## 7. Progress Summary Visual
-
-### Per Workstream
-
-```
-1.0 Inisiasi & Desain     ████████████████████░░ 92%
-2.0 Project Foundation    ████████████████████░░ 95%
-3.0 Domain & Persistence  ██████████████████░░░░ 85% ▲
-4.0 Core Payment API      ██░░░░░░░░░░░░░░░░░░░░ 15%
-5.0 Provider Integration  ████████████████████░░ 90%
-6.0 Reliability           ██░░░░░░░░░░░░░░░░░░░░ 15%
-7.0 Secure Webhook        ░░░░░░░░░░░░░░░░░░░░░░  5%
-8.0 Observability         █░░░░░░░░░░░░░░░░░░░░░  8%
-9.0 Quality Assurance     ░░░░░░░░░░░░░░░░░░░░░░  0%
-10.0 Dokumentasi          ████████████████████░░ 85%
-─────────────────────────────────────────────────────
-TOTAL:                   ████████░░░░░░░░░░░░░░ 42% ▲
-```
-
----
-
-## 8. Prioritas Segera (Next Actions)
-
-| # | Task | Effort | Alasan |
-| --- | --- | --- | --- |
-| **P1** | Auth Middleware | 1 hari | Semua endpoint butuh auth (API key) |
-| **P2** | Idempotency Middleware | 1 hari | Mencegah duplikasi payment |
-| **P3** | PaymentService.create | 1 hari | Core use case — panggil repo + provider |
-| **P4** | Create + Get Payment routes | 1 hari | Endpoint publik utama |
-| **P5** | ProviderService.call | 1 hari | Integrasi provider adapter |
-| **P6** | JSON Logging + Metrics | 1 hari | Observability dasar |
-
-### ✅ Tahap 1 (Repository Layer) — SELESAI
-- Semua 6 trait repository ✅
-- Semua 6 implementasi SQLx ✅ (17 queries)
-- Semua row struct dengan `sqlx::FromRow` ✅
-
----
-
-## 9. Deliverables Final
-
-| Deliverable | Target | Status |
+| Versi | Tanggal | Perubahan |
 | --- | --- | --- |
-| Source code Rust (full implementasi) | Hari 21 | 🔶 40% |
-| Database migrations | ✅ | ✅ |
-| Provider simulators (Alpha/Beta/Gamma) | ✅ | ✅ |
-| Dockerfile + docker-compose.yml | ✅ | ✅ |
-| OpenAPI specification | ✅ | ✅ |
-| Postman collection | Hari 29 | ❌ |
-| Automated test suite | Hari 29 | ❌ |
-| CI/CD (GitHub Actions) | Hari 29 | ❌ |
-| Threat model | Hari 28 | ❌ |
-| README | ✅ | ✅ |
-| Demo script | Hari 29 | ❌ |
-
----
-
-## 10. Changelog
-
-| Versi | Tanggal | Perubahan | Penulis |
-| --- | --- | --- | --- |
-| 1.0 | 13 September 2026 | Progress report pertama — akhir Fase 2 Foundation | Engineering Team |
-| 1.1 | 13 September 2026 | Update setelah implementasi Repository Layer (Tahap 1) — 6 trait + 6 impl SQLx | Engineering Team |
-
-### Tahap 5: Observability & Operations (2 hari)
-
-```
-5.1 JSON Logging (0.5 hari) — tracing-subscriber formatter
-5.2 Prometheus Metrics (1 hari) — Counter + Histogram + Exporter
-5.3 Operations Endpoints (0.5 hari) — Cancel/Retry/Reconcile
-```
-
-### Tahap 6: Quality Assurance (2 hari)
-
-```
-6.1 Unit Test Domain (1 hari) — State machine, rules, status, retry
-6.2 Integration Test (1 hari) — API flow, idempotency, concurrency
-```
-
-### Tahap 7: Handover (1 hari)
-
-```
-7.1 OpenAPI Finalisasi + Postman (0.5 hari)
-7.2 CI Pipeline — GitHub Actions (0.5 hari)
-7.3 Demo Script (0.5 hari)
-```
-
----
-| 5.5 | Error mapping | ✅ `ProviderError` enum |
-
-### ❌ 6.0 — Reliability (4 hari) — **15%**
-
-| ID | Task | Status |
-| --- | --- | --- |
-| 6.1 | Timeout handling | ❌ Belum |
-| 6.2 | Retry mechanism | 🔶 Rules siap, implementasi ❌ |
-| 6.3 | Reconciliation | ❌ Stub |
-| 6.4 | Redis distributed lock | ✅ **Lengkap** `lock.rs` |
-| 6.5 | Circuit breaker | ❌ Belum |
-
-### ❌ 7.0 — Secure Webhook (3 hari) — **5%**
-
-| ID | Task | Status |
-| --- | --- | --- |
-| 7.1 | HMAC verification | ❌ Stub |
-| 7.2 | Replay protection | 🔶 Constraint siap |
-| 7.3 | Webhook processing | ❌ Stub |
-
-### ❌ 8.0 — Observability (2 hari) — **8%**
-
-| ID | Task | Status |
-| --- | --- | --- |
-| 8.1 | JSON logging | ❌ Stub |
-| 8.2 | Prometheus metrics | ❌ Stub |
-| 8.3 | Readiness + operations | ✅ Health route siap |
-
-### ❌ 9.0 — Quality Assurance (2 hari) — **0%**
-
-Belum ada satupun test yang diimplementasi.
-
-### ✅ 10.0 — Dokumentasi (1 hari) — **SELESAI 85%**
-
-| Dokumen | Status |
-| --- | --- |
-| BRD, PRD, WBS | ✅ |
-| API Contract, OpenAPI, Architecture, ERD | ✅ |
-| README, Production Migration Plan, Progress Report | ✅ |
-| Postman collection, demo script | ❌ |
-
----
+| 1.0 | 13 September 2026 | Report awal foundation |
+| 1.1 | 13 September 2026 | Update repository layer |
+| 2.0 | 17 September 2026 | Audit ulang berdasarkan implementasi aktual, klasifikasi selesai/parsial/belum, dan penambahan backlog fallback |

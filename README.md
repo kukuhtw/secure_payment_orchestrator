@@ -70,7 +70,8 @@ Ketika provider timeout setelah request terkirim:
 
 Secure Payment Orchestrator adalah layanan backend berbasis **Rust** yang menyediakan satu antarmuka pembayaran terpadu untuk menghubungkan merchant dengan beberapa payment provider. Sistem ini menangani pemilihan provider, pencegahan transaksi ganda (idempotency), retry aman, failover terbatas, webhook terverifikasi (HMAC), rekonsiliasi, dan audit trail lengkap.
 
-> **⚠️ Peringatan:** Ini adalah Proof of Concept (POC) yang menggunakan **provider simulasi** dan **tidak memproses uang sungguhan**. Jangan gunakan di production.
+> **⚠️ Peringatan:** Ini adalah Proof of Concept (POC). Midtrans hanya dikonfigurasi ke
+> Sandbox, sedangkan provider lain masih berupa simulator. Jangan gunakan di production.
 
 ---
 
@@ -105,7 +106,9 @@ Fungsi SPO:
 
 ### 🧪 Lalu Apa Itu "Provider Simulator"?
 
-Provider simulator adalah **versi tiruan** dari payment gateway yang berjalan **lokal di komputer**. Karena POC ini tidak terhubung ke payment gateway sungguhan (Midtrans, Xendit, Stripe, dll), kami membuat simulator yang:
+Provider simulator adalah **versi tiruan** dari payment gateway yang berjalan **lokal di komputer**.
+Pada POC ini Alpha telah diganti dengan adapter Midtrans Sandbox, Beta dengan adapter
+Xendit test mode, dan hanya Gamma yang tetap berupa simulator lokal.
 
 | Aspek | Provider Simulator | Payment Gateway Sungguhan |
 | --- | --- | --- |
@@ -113,7 +116,7 @@ Provider simulator adalah **versi tiruan** dari payment gateway yang berjalan **
 | **Response** | Dikontrol (success/rejection/timeout) | Tergantung pembayaran customer |
 | **Webhook** | Dikirim lokal | Dikirim dari server cloud |
 | **Uang** | ❌ Tidak ada uang sungguhan | ✅ Memproses transaksi riil |
-| **Koneksi** | `localhost:9091/9092/9093` | Internet / cloud |
+| **Koneksi** | Gamma berjalan lokal | Midtrans Sandbox dan Xendit test mode melalui internet |
 
 **Tujuan simulator:**
 1. **Membuktikan arsitektur** — bahwa pola adapter, retry, circuit breaker, dan webhook verification bekerja
@@ -132,15 +135,70 @@ Jadi: **SPO bukan payment gateway, melainkan orchestrator yang mempermudah pengg
 
 ---
 
+## Fallback Antar-Payment Gateway
+
+SPO dirancang agar dapat menggunakan payment gateway alternatif ketika gateway utama
+bermasalah. Sebagai contoh, sebuah payment yang semula diarahkan ke Gateway A dapat
+dialihkan ke Gateway B. Pengalihan ini disebut **failover** atau **provider fallback**.
+
+Fallback bukan berarti setiap error dari Gateway A langsung dikirim ulang ke Gateway B.
+Sistem harus memastikan lebih dahulu bahwa Gateway A belum membuat atau memproses
+transaksi. Tanpa pemeriksaan tersebut, satu order dapat menghasilkan dua transaksi.
+
+| Hasil dari Gateway A | Tindakan SPO | Boleh fallback ke B? |
+| --- | --- | --- |
+| Gateway tidak tersedia sebelum request dikirim, misalnya circuit breaker `OPEN` | Pilih provider sehat berikutnya | Ya |
+| Koneksi gagal dan dapat dipastikan request belum sampai ke provider | Catat attempt gagal lalu pilih provider berikutnya | Ya |
+| HTTP 429, 502, 503, atau 504 | Terapkan retry policy dan batas attempt | Ya, setelah kegagalan dipastikan aman |
+| Validation error, authentication error, atau transaksi ditolak | Tandai sebagai kegagalan permanen | Tidak |
+| Timeout setelah request mungkin sudah terkirim | Tandai `PENDING_RECONCILIATION` dan query status Gateway A | Belum |
+| Rekonsiliasi memastikan transaksi tidak pernah tercipta | Buat attempt `FAILOVER` ke Gateway B | Ya |
+| Rekonsiliasi menemukan transaksi sudah tercipta atau berhasil | Pertahankan transaksi pada Gateway A | Tidak |
+| Status tetap tidak diketahui | Hentikan otomatisasi dan kirim ke manual review | Tidak |
+
+Alur amannya adalah:
+
+```text
+Pilih Gateway A
+      |
+      +-- A tidak tersedia sebelum request dikirim --> pilih Gateway B
+      |
+      +-- request ditolak secara permanen ----------> FAILED
+      |
+      +-- timeout / hasil tidak diketahui
+              |
+              +--> PENDING_RECONCILIATION
+                      |
+                      +-- transaksi ada ------> tetap di Gateway A
+                      +-- transaksi tidak ada -> failover ke Gateway B
+                      +-- masih tidak pasti ---> manual review
+```
+
+Setiap perpindahan provider harus disimpan sebagai `payment_attempt` baru dengan
+`attempt_type = FAILOVER`. Payment ID dan merchant reference di SPO tetap sama, sedangkan
+provider, provider payment ID, dan payment URL dapat berubah. Gateway tujuan juga harus
+mendukung currency, metode pembayaran, dan fitur yang dibutuhkan oleh transaksi tersebut.
+
+> **Status implementasi POC:** struktur multi-provider, kontrak adapter, tipe attempt
+> `FAILOVER`, dan state `PENDING_RECONCILIATION` sudah disiapkan. Provider selection,
+> timeout handling, retry worker, reconciliation, dan circuit breaker belum selesai
+> diimplementasikan secara end-to-end. Karena itu, fallback otomatis belum siap digunakan
+> untuk transaksi production.
+
+---
+
 ## Daftar Isi
 
 - [Apa Itu Provider Simulator? Apakah Ini Payment Gateway?](#apa-itu-provider-simulator-apakah-ini-payment-gateway)
+- [Fallback Antar-Payment Gateway](#fallback-antar-payment-gateway)
 - [Untuk Siapa Aplikasi Ini?](#untuk-siapa-aplikasi-ini)
 - [Masalah Apa yang Ingin Diselesaikan?](#masalah-apa-yang-ingin-diselesaikan)
 - [Manfaat Aplikasi Ini](#manfaat-aplikasi-ini)
 - [Fitur](#fitur)
 - [Tech Stack](#tech-stack)
 - [Arsitektur](#arsitektur)
+- [Integrasi Midtrans (Provider Alpha)](#integrasi-midtrans-provider-alpha)
+- [Integrasi Xendit (Provider Beta)](#integrasi-xendit-provider-beta)
 - [Struktur Proyek](#struktur-proyek)
 - [Prasyarat](#prasyarat)
 - [Instalasi & Menjalankan](#instalasi--menjalankan)
@@ -182,8 +240,81 @@ Jadi: **SPO bukan payment gateway, melainkan orchestrator yang mempermudah pengg
 
 ### Provider Adapter
 - ✅ Pattern trait-based untuk isolasi provider
-- ✅ 3 provider simulator: Alpha, Beta, Gamma
-- ✅ Error mapping dan classification (retryable vs non-retryable)
+- ✅ Adapter Midtrans Sandbox dan Xendit test mode serta simulator Gamma
+- 🔶 Error mapping provider tersedia; orchestration classification belum terhubung
+---
+
+## Integrasi Midtrans (Provider Alpha)
+
+Provider yang sebelumnya bernama Alpha sekarang mengidentifikasi diri sebagai `MIDTRANS`.
+Implementasinya mengikuti [Midtrans API Quick Start](https://docs.midtrans.com/reference/quick-start-1):
+
+- Create payment menggunakan `POST /snap/v1/transactions`.
+- Status lookup/reconciliation menggunakan `GET /v2/{order_id}/status`.
+- Autentikasi menggunakan HTTP Basic Auth dengan Server Key sebagai username dan password kosong.
+- `merchant_reference` SPO dipakai sebagai Midtrans `order_id`.
+- `gross_amount` dikirim sebagai integer; adapter saat ini hanya menerima `IDR`.
+- `redirect_url` dari Snap menjadi `payment_url` SPO.
+
+Tambahkan Server Key Sandbox ke environment lokal dan jangan commit nilainya:
+
+```env
+MIDTRANS_SERVER_KEY=your-sandbox-server-key
+MIDTRANS_SNAP_BASE_URL=https://app.sandbox.midtrans.com
+MIDTRANS_CORE_BASE_URL=https://api.sandbox.midtrans.com
+MIDTRANS_TIMEOUT_SECONDS=10
+```
+
+| Status Midtrans | Status internal provider |
+| --- | --- |
+| `settlement`, atau `capture` + fraud `accept` | `COMPLETED` |
+| `capture` + fraud `challenge` | `PENDING` |
+| `capture` tanpa fraud status yang dikenal | `UNKNOWN` |
+| `pending` | `PENDING` |
+| `deny`, `cancel`, `expire`, `failure` | `FAILED` |
+| `refund`, `partial_refund` | `REFUNDED` |
+| Status lain | `UNKNOWN` dan perlu reconciliation/manual review |
+
+> Integrasi ini baru tersedia pada layer adapter. Endpoint create payment SPO dan webhook
+> processing belum diimplementasikan end-to-end, sehingga belum siap digunakan di production.
+> Notifikasi Midtrans nantinya harus diverifikasi menggunakan signature Midtrans berbasis
+> Server Key, bukan mekanisme HMAC simulator.
+
+---
+
+## Integrasi Xendit (Provider Beta)
+
+Provider yang sebelumnya bernama Beta sekarang mengidentifikasi diri sebagai `XENDIT`.
+Implementasinya menggunakan Payment Link/Invoice API dari
+[Xendit API Reference](https://docs.xendit.co/apidocs):
+
+- Create payment menggunakan `POST /v2/invoices`.
+- Status lookup/reconciliation menggunakan `GET /v2/invoices/{invoice_id}`.
+- Autentikasi menggunakan HTTP Basic Auth dengan Secret API Key sebagai username dan password kosong.
+- `merchant_reference` SPO dipakai sebagai Xendit `external_id`.
+- `invoice_url` dari Xendit menjadi `payment_url` SPO.
+- Adapter saat ini dibatasi ke mata uang `IDR`.
+
+Test mode ditentukan oleh API key Xendit, bukan base URL yang berbeda:
+
+```env
+XENDIT_SECRET_KEY=your-test-secret-key
+XENDIT_CALLBACK_TOKEN=your-test-callback-token
+XENDIT_BASE_URL=https://api.xendit.co
+XENDIT_TIMEOUT_SECONDS=10
+```
+
+| Status invoice Xendit | Status internal provider |
+| --- | --- |
+| `PAID`, `SETTLED` | `COMPLETED` |
+| `PENDING` | `PENDING` |
+| `EXPIRED`, `FAILED` | `FAILED` |
+| Status lain | `UNKNOWN` dan perlu reconciliation/manual review |
+
+> Secret API Key tidak boleh dikirim ke frontend atau disimpan di repository. Callback
+> Xendit nantinya harus diverifikasi menggunakan `X-CALLBACK-TOKEN`; webhook processing
+> SPO masih belum diimplementasikan end-to-end.
+
 ---
 
 ## Struktur Proyek
@@ -331,8 +462,8 @@ Response:
     "status": "PENDING",
     "amount": 150000,
     "currency": "IDR",
-    "provider": "ALPHA",
-    "payment_url": "http://localhost:9091/pay/pay_01J8ZVX8B8",
+    "provider": "MIDTRANS",
+    "payment_url": "https://app.sandbox.midtrans.com/snap/v4/redirection/<token>",
     "created_at": "2026-09-13T10:00:00Z"
   }
 }
@@ -389,9 +520,9 @@ curl -X POST http://localhost:8080/api/v1/payments/pay_01J8ZVX8B8/reconcile \
 
 | Milestone | Target | Fitur |
 | --- | --- | --- |
-| **M1 - Core Payment** | ✅ Selesai | Axum API, state machine, PostgreSQL, create/get payment, Alpha simulator, idempotency, audit log |
+| **M1 - Core Payment** | Dalam progress | Fondasi Axum, state machine, PostgreSQL, dan Midtrans adapter; handler payment belum selesai |
 | **M2 - Security & Reliability** | 📅 Dalam Progress | HMAC webhook, duplicate protection, retry, timeout, reconciliation, structured logging |
-| **M3 - Multi-Provider & Portfolio Ready** | 📅 Planned | Beta & Gamma simulator, circuit breaker, Redis lock, metrics, CI, OpenAPI, Postman, threat model, demo script |
+| **M3 - Multi-Provider & Portfolio Ready** | Dalam progress | Adapter Midtrans/Xendit tersedia; circuit breaker, metrics, CI, Postman, threat model, dan demo belum selesai |
 
 ---
 
@@ -401,4 +532,4 @@ Proyek ini dibuat untuk tujuan demonstrasi portfolio dan technical assessment.
 
 ---
 
-*Dokumen diperbarui: 13 September 2026*
+*Dokumen diperbarui: 17 September 2026*

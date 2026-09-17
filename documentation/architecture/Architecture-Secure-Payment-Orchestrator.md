@@ -216,7 +216,9 @@ pub trait PaymentProvider: Send + Sync {
 }
 ```
 
-Setiap provider (Alpha, Beta, Gamma) mengimplementasikan trait di atas dengan simulator lokal.
+Setiap provider mengimplementasikan trait di atas. Provider internal Alpha dipetakan ke
+Midtrans Sandbox melalui Snap API untuk create payment dan Core API untuk status lookup;
+Beta dipetakan ke Xendit Payment Link/Invoice API dan Gamma masih berupa simulator lokal.
 
 ---
 
@@ -302,6 +304,68 @@ flowchart TD
     I -->|"Failed"| D
     I -->|"Uncertain"| J["MANUAL_REVIEW"]
 ```
+
+---
+
+### 3.4 Provider Fallback Flow
+
+Provider fallback adalah pengalihan payment dari provider awal ke provider alternatif.
+Fallback hanya dilakukan jika sistem mempunyai bukti yang cukup bahwa provider awal
+belum membuat transaksi. Prinsip ini mencegah duplicate payment atau double charge ketika
+response provider hilang setelah request berhasil diterima.
+
+```mermaid
+flowchart TD
+    A["Select Gateway A"] --> B{"A available?"}
+    B -->|"No, request not sent"| H["Select compatible Gateway B"]
+    B -->|"Yes"| C["Send create-payment request"]
+    C -->|"Success"| D["Continue with Gateway A"]
+    C -->|"Permanent rejection"| E["FAILED - no fallback"]
+    C -->|"Confirmed safe failure"| H
+    C -->|"Timeout / ambiguous result"| F["PENDING_RECONCILIATION"]
+    F --> G["Query status at Gateway A"]
+    G -->|"Transaction exists"| D
+    G -->|"Confirmed not created"| H
+    G -->|"Still uncertain"| I["MANUAL_REVIEW"]
+    H --> J["Create FAILOVER attempt"]
+    J --> K["Send request to Gateway B"]
+```
+
+#### Fallback decision rules
+
+| Condition | Decision | Reason |
+| --- | --- | --- |
+| Circuit breaker provider awal `OPEN` sebelum request dikirim | Fallback | Tidak ada transaksi yang mungkin tercipta di provider awal |
+| Koneksi gagal sebelum request meninggalkan SPO | Fallback | Kegagalan dapat dipastikan aman |
+| Provider rejection atau validation/authentication error | Tidak fallback | Error bersifat permanen atau request merchant harus diperbaiki |
+| Timeout setelah request dikirim | Reconciliation dahulu | Provider mungkin sudah membuat transaksi |
+| Reconciliation menyatakan transaksi tidak ditemukan | Fallback | Provider awal dipastikan tidak memiliki transaksi |
+| Reconciliation menemukan transaksi | Tidak fallback | Melanjutkan di provider awal mencegah duplikasi |
+| Reconciliation tetap ambigu | Manual review | Tidak ada dasar aman untuk membuat transaksi kedua |
+
+#### Data and consistency requirements
+
+1. Satu payment mempertahankan `payment_id`, `merchant_id`, `merchant_reference`, amount,
+   dan currency yang sama selama failover.
+2. Setiap provider call menghasilkan record `payment_attempts` tersendiri. Perpindahan
+   provider menggunakan `attempt_type = FAILOVER` dan nomor attempt berikutnya.
+3. Provider payment ID dan payment URL berasal dari attempt/provider yang aktif dan dapat
+   berubah setelah failover.
+4. Pemilihan provider alternatif harus memeriksa availability, priority, currency, metode
+   pembayaran, dan capability yang dibutuhkan.
+5. Lock per payment diperlukan agar retry, webhook, reconciliation, dan failover tidak
+   berjalan bersamaan.
+6. Late webhook dari provider lama tetap disimpan dan diverifikasi. Jika bertentangan
+   dengan attempt aktif, payment ditahan untuk reconciliation/manual review, bukan langsung
+   ditimpa.
+
+#### Current implementation status
+
+Dokumen ini mendeskripsikan target architecture. Pada POC saat ini, provider adapter,
+multi-provider registration, `FAILOVER` attempt type, dan status
+`PENDING_RECONCILIATION` sudah tersedia sebagai fondasi. Provider routing, timeout/retry
+worker, reconciliation end-to-end, dan circuit breaker belum selesai. Oleh karena itu,
+automatic fallback belum dianggap production-ready.
 
 ---
 
@@ -530,18 +594,18 @@ Digunakan untuk mencegah race condition pada operasi concurrent:
 flowchart TB
     subgraph Docker_Network["Docker Network"]
         API["SPO API\n(Rust / Axum)\nPort 8080"]
-        ALPHA["Alpha Simulator\n(Rust / Axum)\nPort 9091"]
-        BETA["Beta Simulator\n(Rust / Axum)\nPort 9092"]
         GAMMA["Gamma Simulator\n(Rust / Axum)\nPort 9093"]
         PG[("PostgreSQL\nPort 5432")]
         RD[("Redis\nPort 6379")]
     end
+    MIDTRANS["Midtrans Sandbox\nSnap + Core API"]
+    XENDIT["Xendit Test Mode\nInvoice API"]
 
     Merchant["Merchant App"] --> API
     Provider["Provider Simulators"] --> API
 
-    API --> ALPHA
-    API --> BETA
+    API --> MIDTRANS
+    API --> XENDIT
     API --> GAMMA
     API --> PG
     API --> RD
@@ -558,24 +622,18 @@ services:
     environment:
       - DATABASE_URL=postgres://spo:spo@postgres:5432/spo
       - REDIS_URL=redis://redis:6379
-      - ALPHA_BASE_URL=http://alpha-simulator:9091
-      - BETA_BASE_URL=http://beta-simulator:9092
+      - MIDTRANS_SERVER_KEY=${MIDTRANS_SERVER_KEY}
+      - MIDTRANS_SNAP_BASE_URL=https://app.sandbox.midtrans.com
+      - MIDTRANS_CORE_BASE_URL=https://api.sandbox.midtrans.com
+      - XENDIT_SECRET_KEY=${XENDIT_SECRET_KEY}
+      - XENDIT_CALLBACK_TOKEN=${XENDIT_CALLBACK_TOKEN}
+      - XENDIT_BASE_URL=https://api.xendit.co
       - GAMMA_BASE_URL=http://gamma-simulator:9093
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-
-  alpha-simulator:
-    build: ./simulators/alpha
-    ports:
-      - "9091:9091"
-
-  beta-simulator:
-    build: ./simulators/beta
-    ports:
-      - "9092:9092"
 
   gamma-simulator:
     build: ./simulators/gamma

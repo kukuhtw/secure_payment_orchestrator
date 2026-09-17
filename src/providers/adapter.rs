@@ -7,7 +7,11 @@ use serde_json::Value;
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("Provider returned error: {code} - {message}")]
-    Provider { code: String, message: String, http_status: u16 },
+    Provider {
+        code: String,
+        message: String,
+        http_status: u16,
+    },
 
     #[error("Request timeout after {ms}ms")]
     Timeout { ms: u64 },
@@ -50,8 +54,14 @@ pub trait PaymentProvider: Send + Sync {
     fn is_available(&self) -> bool;
 
     /// Buat pembayaran di provider.
-    async fn create_payment(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError>;
+    async fn create_payment(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<ProviderResponse, ProviderError>;
 
     /// Dapatkan status pembayaran dari provider.
-    async fn get_payment_status(&self, provider_payment_id: &str) -> Result<ProviderResponse, ProviderError>;
+    async fn get_payment_status(
+        &self,
+        provider_payment_id: &str,
+    ) -> Result<ProviderResponse, ProviderError>;
 }

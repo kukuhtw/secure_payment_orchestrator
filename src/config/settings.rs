@@ -8,9 +8,18 @@ pub struct Settings {
     pub database_url: String,
     pub redis_url: String,
     pub log_level: String,
-    pub webhook_secret_alpha: String,
-    pub webhook_secret_beta: String,
-    pub webhook_secret_gamma: String,
+    pub midtrans_server_key: String,
+    pub midtrans_snap_base_url: String,
+    pub midtrans_core_base_url: String,
+    pub midtrans_timeout_seconds: u64,
+    pub xendit_secret_key: String,
+    pub xendit_callback_token: String,
+    pub xendit_base_url: String,
+    pub xendit_timeout_seconds: u64,
+    pub doku_client_id: String,
+    pub doku_secret_key: String,
+    pub doku_base_url: String,
+    pub doku_timeout_seconds: u64,
     pub max_retry_attempts: i32,
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_timeout_seconds: u64,
@@ -29,14 +38,30 @@ impl Settings {
                 .unwrap_or_else(|_| "postgres://spo:spo@localhost:5432/spo".into()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".into()),
-            log_level: std::env::var("LOG_LEVEL")
-                .unwrap_or_else(|_| "info".into()),
-            webhook_secret_alpha: std::env::var("WEBHOOK_SECRET_ALPHA")
-                .unwrap_or_else(|_| "alpha-secret-dev".into()),
-            webhook_secret_beta: std::env::var("WEBHOOK_SECRET_BETA")
-                .unwrap_or_else(|_| "beta-secret-dev".into()),
-            webhook_secret_gamma: std::env::var("WEBHOOK_SECRET_GAMMA")
-                .unwrap_or_else(|_| "gamma-secret-dev".into()),
+            log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into()),
+            midtrans_server_key: std::env::var("MIDTRANS_SERVER_KEY").unwrap_or_default(),
+            midtrans_snap_base_url: std::env::var("MIDTRANS_SNAP_BASE_URL")
+                .unwrap_or_else(|_| "https://app.sandbox.midtrans.com".into()),
+            midtrans_core_base_url: std::env::var("MIDTRANS_CORE_BASE_URL")
+                .unwrap_or_else(|_| "https://api.sandbox.midtrans.com".into()),
+            midtrans_timeout_seconds: std::env::var("MIDTRANS_TIMEOUT_SECONDS")
+                .unwrap_or_else(|_| "10".into())
+                .parse()?,
+            xendit_secret_key: std::env::var("XENDIT_SECRET_KEY").unwrap_or_default(),
+            xendit_callback_token: std::env::var("XENDIT_CALLBACK_TOKEN")
+                .unwrap_or_default(),
+            xendit_base_url: std::env::var("XENDIT_BASE_URL")
+                .unwrap_or_else(|_| "https://api.xendit.co".into()),
+            xendit_timeout_seconds: std::env::var("XENDIT_TIMEOUT_SECONDS")
+                .unwrap_or_else(|_| "10".into())
+                .parse()?,
+            doku_client_id: std::env::var("DOKU_CLIENT_ID").unwrap_or_default(),
+            doku_secret_key: std::env::var("DOKU_SECRET_KEY").unwrap_or_default(),
+            doku_base_url: std::env::var("DOKU_BASE_URL")
+                .unwrap_or_else(|_| "https://api-sandbox.doku.com".into()),
+            doku_timeout_seconds: std::env::var("DOKU_TIMEOUT_SECONDS")
+                .unwrap_or_else(|_| "10".into())
+                .parse()?,
             max_retry_attempts: std::env::var("MAX_RETRY_ATTEMPTS")
                 .unwrap_or_else(|_| "5".into())
                 .parse()?,

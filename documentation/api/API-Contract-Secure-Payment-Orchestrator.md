@@ -21,7 +21,9 @@
 http://localhost:8080/api/v1
 ```
 
-Untuk environment POC, semua endpoint menggunakan base URL di atas. Provider simulator berjalan pada port terpisah (`:9091`, `:9092`, `:9093`).
+Untuk environment POC, semua endpoint menggunakan base URL di atas. Provider Alpha telah
+dipetakan ke Midtrans Sandbox, Beta dipetakan ke Xendit test mode, dan Gamma tetap berupa
+simulator lokal.
 
 ### 1.2 Authentication
 
@@ -159,8 +161,8 @@ POST /api/v1/payments
     "status": "PENDING",
     "amount": 250000,
     "currency": "IDR",
-    "provider": "ALPHA",
-    "payment_url": "http://localhost:9091/pay/pay_01J8ZVX8B8",
+    "provider": "MIDTRANS",
+    "payment_url": "https://app.sandbox.midtrans.com/snap/v4/redirection/<token>",
     "created_at": "2026-09-13T10:00:00Z"
   }
 }
@@ -175,7 +177,7 @@ POST /api/v1/payments
 | `status` | `string` | Status awal: `PENDING` |
 | `amount` | `integer` | Jumlah dalam satuan terkecil |
 | `currency` | `string` | Kode ISO 4217 |
-| `provider` | `string` | Provider terpilih (`ALPHA`, `BETA`, `GAMMA`) |
+| `provider` | `string` | Provider terpilih (`MIDTRANS`, `XENDIT`, `GAMMA`) |
 | `payment_url` | `string` | URL redirect ke provider |
 | `created_at` | `string (ISO 8601)` | Waktu pembuatan |
 
@@ -191,8 +193,8 @@ Jika idempotency key dan request body sama dengan request sebelumnya:
     "status": "PROCESSING",
     "amount": 250000,
     "currency": "IDR",
-    "provider": "ALPHA",
-    "payment_url": "http://localhost:9091/pay/pay_01J8ZVX8B8",
+    "provider": "MIDTRANS",
+    "payment_url": "https://app.sandbox.midtrans.com/snap/v4/redirection/<token>",
     "created_at": "2026-09-13T10:00:00Z"
   }
 }
@@ -254,12 +256,12 @@ GET /api/v1/payments/{payment_id}
     "status": "SUCCESS",
     "amount": 250000,
     "currency": "IDR",
-    "provider": "ALPHA",
-    "payment_url": "http://localhost:9091/pay/pay_01J8ZVX8B8",
+    "provider": "MIDTRANS",
+    "payment_url": "https://app.sandbox.midtrans.com/snap/v4/redirection/<token>",
     "attempts": [
       {
         "attempt_number": 1,
-        "provider": "ALPHA",
+        "provider": "MIDTRANS",
         "status": "SUCCESS",
         "duration_ms": 1250,
         "attempt_type": "INITIAL",
@@ -377,7 +379,7 @@ POST /api/v1/payments/{payment_id}/retry
     "payment_id": "pay_01J8ZVX8B8",
     "status": "PROCESSING",
     "attempt_number": 2,
-    "provider": "BETA",
+    "provider": "XENDIT",
     "message": "Retry initiated"
   }
 }
@@ -547,15 +549,15 @@ GET /metrics
 ```text
 # HELP spo_payments_total Total number of payments
 # TYPE spo_payments_total counter
-spo_payments_total{status="SUCCESS",provider="ALPHA"} 125
-spo_payments_total{status="FAILED",provider="ALPHA"} 3
+spo_payments_total{status="SUCCESS",provider="MIDTRANS"} 125
+spo_payments_total{status="FAILED",provider="MIDTRANS"} 3
 
 # HELP spo_payment_duration_ms Payment processing duration in ms
 # TYPE spo_payment_duration_ms histogram
-spo_payment_duration_ms_bucket{le="100",provider="ALPHA"} 50
-spo_payment_duration_ms_bucket{le="500",provider="ALPHA"} 100
-spo_payment_duration_ms_sum{provider="ALPHA"} 45000
-spo_payment_duration_ms_count{provider="ALPHA"} 128
+spo_payment_duration_ms_bucket{le="100",provider="MIDTRANS"} 50
+spo_payment_duration_ms_bucket{le="500",provider="MIDTRANS"} 100
+spo_payment_duration_ms_sum{provider="MIDTRANS"} 45000
+spo_payment_duration_ms_count{provider="MIDTRANS"} 128
 ```
 
 ---

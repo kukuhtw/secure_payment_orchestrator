@@ -8,8 +8,8 @@ info:
     transaksi ganda, retry yang aman, failover terbatas, webhook
     terverifikasi, rekonsiliasi, dan audit trail.
 
-    Proof of Concept menggunakan provider simulasi dan tidak memproses
-    uang sungguhan. Tujuan utamanya adalah membuktikan rancangan layanan
+    Proof of Concept menggunakan Midtrans Sandbox serta provider simulasi
+    dan tidak memproses uang sungguhan. Tujuan utamanya adalah membuktikan rancangan layanan
     pembayaran yang benar, dapat diuji, aman, mudah diaudit, dan tahan
     terhadap kegagalan jaringan maupun provider.
   version: "1.0.0"
@@ -426,7 +426,7 @@ CreatePaymentResponse:
               type: string
               format: uri
               description: "URL redirect ke provider"
-              example: "http://localhost:9091/pay/pay_01J8ZVX8B8"
+              example: "https://app.sandbox.midtrans.com/snap/v4/redirection/<token>"
             created_at:
               type: string
               format: date-time
@@ -608,8 +608,8 @@ PaymentSummary:
     ProviderName:
       type: string
       enum:
-        - ALPHA
-        - BETA
+        - MIDTRANS
+        - XENDIT
         - GAMMA
 
     ErrorResponse:
