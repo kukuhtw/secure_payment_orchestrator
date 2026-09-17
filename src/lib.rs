@@ -13,17 +13,17 @@
 
 pub mod api;
 pub mod application;
+pub mod config;
 pub mod domain;
 pub mod infrastructure;
+pub mod observability;
 pub mod providers;
 pub mod security;
-pub mod observability;
-pub mod config;
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use crate::infrastructure::Repositories;
 use crate::providers::adapter::PaymentProvider;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Shared application state injected into all route handlers.
 pub struct AppState {

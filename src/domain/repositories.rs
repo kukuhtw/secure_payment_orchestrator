@@ -3,11 +3,11 @@
 //! Domain layer mendefinisikan interface (trait), infrastruktur mengimplementasikannya.
 //! Ini memastikan domain tidak bergantung pada framework atau database driver.
 
-use async_trait::async_trait;
-use uuid::Uuid;
-use crate::domain::payment::Payment;
 use crate::domain::attempt::PaymentAttempt;
 use crate::domain::error::DomainError;
+use crate::domain::payment::Payment;
+use async_trait::async_trait;
+use uuid::Uuid;
 
 // ─── Merchant & API Key ─────────────────────────────────
 
@@ -98,7 +98,8 @@ pub struct PaginatedResult<T> {
 #[async_trait]
 pub trait AttemptRepository: Send + Sync {
     async fn save(&self, attempt: &PaymentAttempt) -> Result<(), DomainError>;
-    async fn get_by_payment_id(&self, payment_id: Uuid) -> Result<Vec<PaymentAttempt>, DomainError>;
+    async fn get_by_payment_id(&self, payment_id: Uuid)
+        -> Result<Vec<PaymentAttempt>, DomainError>;
     async fn count_attempts(&self, payment_id: Uuid) -> Result<i32, DomainError>;
 }
 
@@ -118,7 +119,11 @@ pub struct IdempotencyRow {
 
 #[async_trait]
 pub trait IdempotencyRepository: Send + Sync {
-    async fn find_by_key(&self, key: &str, merchant_id: Uuid) -> Result<Option<IdempotencyRow>, DomainError>;
+    async fn find_by_key(
+        &self,
+        key: &str,
+        merchant_id: Uuid,
+    ) -> Result<Option<IdempotencyRow>, DomainError>;
     async fn save(&self, row: &IdempotencyRow) -> Result<(), DomainError>;
 }
 
@@ -170,13 +175,25 @@ pub struct WebhookEventRow {
 #[async_trait]
 pub trait WebhookEventRepository: Send + Sync {
     async fn save(&self, event: &WebhookEventRow) -> Result<(), DomainError>;
-    async fn find_by_event_id(&self, provider: &str, event_id: &str) -> Result<Option<WebhookEventRow>, DomainError>;
+    async fn find_by_event_id(
+        &self,
+        provider: &str,
+        event_id: &str,
+    ) -> Result<Option<WebhookEventRow>, DomainError>;
     async fn update_processing_status(&self, id: Uuid, status: &str) -> Result<(), DomainError>;
 }
 #[async_trait]
 pub trait PaymentRepository: Send + Sync {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError>;
     async fn get_by_id(&self, id: Uuid, merchant_id: Uuid) -> Result<PaymentRow, DomainError>;
-    async fn update_status(&self, id: Uuid, status: &str, failure_reason: Option<&str>) -> Result<(), DomainError>;
-    async fn search(&self, criteria: &SearchCriteria) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError>;
+    async fn update_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+    ) -> Result<(), DomainError>;
+    async fn search(
+        &self,
+        criteria: &SearchCriteria,
+    ) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError>;
 }

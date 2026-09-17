@@ -1,13 +1,10 @@
 //! State transition rules and business rules engine.
 
-use crate::domain::status::PaymentStatus;
 use crate::domain::error::DomainError;
+use crate::domain::status::PaymentStatus;
 
 /// Validasi transisi status berdasarkan transition matrix.
-pub fn validate_transition(
-    from: PaymentStatus,
-    to: PaymentStatus,
-) -> Result<(), DomainError> {
+pub fn validate_transition(from: PaymentStatus, to: PaymentStatus) -> Result<(), DomainError> {
     let allowed = match (from, to) {
         // PENDING → PROCESSING
         (PaymentStatus::Pending, PaymentStatus::Processing) => true,
@@ -24,7 +21,10 @@ pub fn validate_transition(
         (PaymentStatus::PendingReconciliation, PaymentStatus::Failed) => true,
         // Any non-final → CANCELLED (kecuali SUCCESS/FAILED)
         (_, PaymentStatus::Cancelled)
-            if from != PaymentStatus::Success && from != PaymentStatus::Failed => true,
+            if from != PaymentStatus::Success && from != PaymentStatus::Failed =>
+        {
+            true
+        }
         _ => false,
     };
 
@@ -41,7 +41,10 @@ pub fn is_retryable_http_status(status: u16) -> bool {
 }
 
 pub fn is_retryable_error(error_code: &str) -> bool {
-    matches!(error_code, "TIMEOUT" | "PROVIDER_UNAVAILABLE" | "RATE_LIMITED")
+    matches!(
+        error_code,
+        "TIMEOUT" | "PROVIDER_UNAVAILABLE" | "RATE_LIMITED"
+    )
 }
 
 /// Maximum retry count sebelum masuk ke reconciliation.

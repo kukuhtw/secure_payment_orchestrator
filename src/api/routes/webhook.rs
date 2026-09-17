@@ -2,14 +2,17 @@
 //!
 //! - `POST /webhooks/{provider}` — Receive webhook from provider
 
-use axum::{Router, routing::post, extract::{Path, State}, Json};
-use crate::SharedState;
 use crate::api::dto::error::ApiError;
+use crate::SharedState;
+use axum::{
+    extract::{Path, State},
+    routing::post,
+    Json, Router,
+};
 use serde_json::Value;
 
 pub fn routes() -> Router<SharedState> {
-    Router::new()
-        .route("/webhooks/{provider}", post(receive_webhook))
+    Router::new().route("/webhooks/{provider}", post(receive_webhook))
 }
 
 async fn receive_webhook(

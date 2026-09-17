@@ -5,7 +5,11 @@
 //! { "error": { "code": "ERROR_CODE", "message": "...", "details": {} } }
 //! ```
 
-use axum::{response::{IntoResponse, Response}, http::StatusCode, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -25,7 +29,11 @@ pub struct ErrorDetail {
 }
 
 impl ApiError {
-    pub fn new(status_code: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        status_code: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             status_code,
             error: ErrorDetail {
@@ -82,11 +90,19 @@ impl ApiError {
     }
 
     pub fn unprocessable(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "INVALID_STATUS_TRANSITION", message)
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_STATUS_TRANSITION",
+            message,
+        )
     }
 
     pub fn internal() -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error")
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Internal server error",
+        )
     }
 }
 

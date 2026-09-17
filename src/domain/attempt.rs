@@ -4,8 +4,8 @@
 //! `PaymentAttempt` adalah domain entity dengan enum types.
 
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 use serde_json::Value;
+use uuid::Uuid;
 
 /// Row type untuk query SQL — semua field String.
 #[derive(Debug, Clone, sqlx::FromRow)]

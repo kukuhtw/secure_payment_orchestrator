@@ -2,13 +2,13 @@
 //!
 //! Semua query menggunakan parameterized query ($1, $2, ...) untuk SQL injection prevention.
 
-use async_trait::async_trait;
-use uuid::Uuid;
-use sqlx::PgPool;
-use crate::domain::payment::Payment;
-use crate::domain::attempt::{PaymentAttempt, AttemptStatus, AttemptType};
+use crate::domain::attempt::{AttemptStatus, AttemptType, PaymentAttempt};
 use crate::domain::error::DomainError;
+use crate::domain::payment::Payment;
 use crate::domain::repositories::*;
+use async_trait::async_trait;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 // ─── API Key Repository ─────────────────────────────────
 
@@ -50,6 +50,8 @@ impl ApiKeyRepository for PgApiKeyRepository {
         .await
         .map_err(|e| DomainError::Validation(e.to_string()))?
         .ok_or_else(|| DomainError::NotFound("Merchant not found or inactive".into()))
+    }
+}
 // ─── Payment Repository ─────────────────────────────────
 
 pub struct PgPaymentRepository {
@@ -112,9 +114,14 @@ impl PaymentRepository for PgPaymentRepository {
         .ok_or_else(|| DomainError::NotFound("Payment not found".into()))
     }
 
-    async fn update_status(&self, id: Uuid, status: &str, failure_reason: Option<&str>) -> Result<(), DomainError> {
-        let completed_at = matches!(status, "SUCCESS" | "FAILED" | "CANCELLED")
-            .then(|| chrono::Utc::now());
+    async fn update_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let completed_at =
+            matches!(status, "SUCCESS" | "FAILED" | "CANCELLED").then(|| chrono::Utc::now());
 
         sqlx::query(
             r#"UPDATE payments SET status = $1, failure_reason = $2,
@@ -131,13 +138,54 @@ impl PaymentRepository for PgPaymentRepository {
         Ok(())
     }
 
-    async fn search(&self, criteria: &SearchCriteria) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError> {
+    async fn search(
+        &self,
+        criteria: &SearchCriteria,
+    ) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError> {
         let offset = (criteria.page - 1) * criteria.limit;
 
         let items = sqlx::query_as::<_, PaymentSummaryRow>(
             r#"SELECT id, merchant_reference, status, amount, currency, provider, created_at
                FROM payments
                WHERE merchant_id = $1
+                 AND ($2::text IS NULL OR merchant_reference = $2)
+                 AND ($3::text IS NULL OR status = $3)
+                 AND ($4::text IS NULL OR provider = $4)
+               ORDER BY created_at DESC
+               LIMIT $5 OFFSET $6"#,
+        )
+        .bind(criteria.merchant_id)
+        .bind(&criteria.merchant_reference)
+        .bind(&criteria.status)
+        .bind(&criteria.provider)
+        .bind(criteria.limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        let (total,): (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM payments WHERE merchant_id = $1
+               AND ($2::text IS NULL OR merchant_reference = $2)
+               AND ($3::text IS NULL OR status = $3)
+               AND ($4::text IS NULL OR provider = $4)"#,
+        )
+        .bind(criteria.merchant_id)
+        .bind(&criteria.merchant_reference)
+        .bind(&criteria.status)
+        .bind(&criteria.provider)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        Ok(PaginatedResult {
+            items,
+            total,
+            page: criteria.page,
+            limit: criteria.limit,
+        })
+    }
+}
 // ─── Attempt Repository ─────────────────────────────────
 
 pub struct PgAttemptRepository {
@@ -145,7 +193,9 @@ pub struct PgAttemptRepository {
 }
 
 impl PgAttemptRepository {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 
 #[async_trait]
@@ -159,14 +209,22 @@ impl AttemptRepository for PgAttemptRepository {
                      completed_at, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
         )
-        .bind(attempt.id).bind(attempt.payment_id)
-        .bind(&attempt.provider).bind(&attempt.provider_payment_id)
-        .bind(&attempt.provider_status).bind(attempt.status.to_string())
-        .bind(attempt.attempt_type.to_string()).bind(attempt.attempt_number)
-        .bind(&attempt.request_snapshot).bind(&attempt.response_snapshot)
-        .bind(attempt.http_status_code).bind(&attempt.error_code)
-        .bind(&attempt.error_message).bind(attempt.duration_ms)
-        .bind(attempt.started_at).bind(attempt.completed_at)
+        .bind(attempt.id)
+        .bind(attempt.payment_id)
+        .bind(&attempt.provider)
+        .bind(&attempt.provider_payment_id)
+        .bind(&attempt.provider_status)
+        .bind(attempt.status.to_string())
+        .bind(attempt.attempt_type.to_string())
+        .bind(attempt.attempt_number)
+        .bind(&attempt.request_snapshot)
+        .bind(&attempt.response_snapshot)
+        .bind(attempt.http_status_code)
+        .bind(&attempt.error_code)
+        .bind(&attempt.error_message)
+        .bind(attempt.duration_ms)
+        .bind(attempt.started_at)
+        .bind(attempt.completed_at)
         .bind(attempt.created_at)
         .execute(&self.pool)
         .await
@@ -174,7 +232,10 @@ impl AttemptRepository for PgAttemptRepository {
         Ok(())
     }
 
-    async fn get_by_payment_id(&self, payment_id: Uuid) -> Result<Vec<PaymentAttempt>, DomainError> {
+    async fn get_by_payment_id(
+        &self,
+        payment_id: Uuid,
+    ) -> Result<Vec<PaymentAttempt>, DomainError> {
         let rows = sqlx::query_as::<_, PaymentAttemptRow>(
             r#"SELECT id, payment_id, provider, provider_payment_id, provider_status,
                       status, attempt_type, attempt_number, request_snapshot, response_snapshot,
@@ -192,13 +253,12 @@ impl AttemptRepository for PgAttemptRepository {
     }
 
     async fn count_attempts(&self, payment_id: Uuid) -> Result<i32, DomainError> {
-        let (count,): (i32,) = sqlx::query_as(
-            r#"SELECT COUNT(*) FROM payment_attempts WHERE payment_id = $1"#,
-        )
-        .bind(payment_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
+        let (count,): (i32,) =
+            sqlx::query_as(r#"SELECT COUNT(*) FROM payment_attempts WHERE payment_id = $1"#)
+                .bind(payment_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DomainError::Validation(e.to_string()))?;
         Ok(count)
     }
 }
@@ -210,7 +270,9 @@ pub struct PgIdempotencyRepository {
 }
 
 impl PgIdempotencyRepository {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 // ─── Audit Log Repository ───────────────────────────────
 
@@ -219,7 +281,9 @@ pub struct PgAuditLogRepository {
 }
 
 impl PgAuditLogRepository {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 
 #[async_trait]
@@ -231,11 +295,20 @@ impl AuditLogRepository for PgAuditLogRepository {
                      ip_address, correlation_id, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"#,
         )
-        .bind(row.id).bind(row.merchant_id).bind(row.payment_id)
-        .bind(row.entity_id).bind(&row.entity_type).bind(&row.action)
-        .bind(&row.actor).bind(&row.field_name).bind(&row.old_value)
-        .bind(&row.new_value).bind(&row.metadata).bind(&row.ip_address)
-        .bind(&row.correlation_id).bind(row.created_at)
+        .bind(row.id)
+        .bind(row.merchant_id)
+        .bind(row.payment_id)
+        .bind(row.entity_id)
+        .bind(&row.entity_type)
+        .bind(&row.action)
+        .bind(&row.actor)
+        .bind(&row.field_name)
+        .bind(&row.old_value)
+        .bind(&row.new_value)
+        .bind(&row.metadata)
+        .bind(&row.ip_address)
+        .bind(&row.correlation_id)
+        .bind(row.created_at)
         .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Validation(e.to_string()))?;
@@ -261,7 +334,9 @@ pub struct PgWebhookEventRepository {
 }
 
 impl PgWebhookEventRepository {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 
 #[async_trait]
@@ -273,11 +348,19 @@ impl WebhookEventRepository for PgWebhookEventRepository {
                      verification_error, received_at, verified_at, processed_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"#,
         )
-        .bind(event.id).bind(event.payment_id).bind(&event.provider)
-        .bind(&event.event_id).bind(&event.event_type).bind(&event.signature)
-        .bind(&event.raw_body).bind(&event.verification_status)
-        .bind(&event.processing_status).bind(&event.verification_error)
-        .bind(event.received_at).bind(event.verified_at).bind(event.processed_at)
+        .bind(event.id)
+        .bind(event.payment_id)
+        .bind(&event.provider)
+        .bind(&event.event_id)
+        .bind(&event.event_type)
+        .bind(&event.signature)
+        .bind(&event.raw_body)
+        .bind(&event.verification_status)
+        .bind(&event.processing_status)
+        .bind(&event.verification_error)
+        .bind(event.received_at)
+        .bind(event.verified_at)
+        .bind(event.processed_at)
         .execute(&self.pool)
         .await
         .map_err(|e| {
@@ -291,7 +374,11 @@ impl WebhookEventRepository for PgWebhookEventRepository {
         Ok(())
     }
 
-    async fn find_by_event_id(&self, provider: &str, event_id: &str) -> Result<Option<WebhookEventRow>, DomainError> {
+    async fn find_by_event_id(
+        &self,
+        provider: &str,
+        event_id: &str,
+    ) -> Result<Option<WebhookEventRow>, DomainError> {
         sqlx::query_as::<_, WebhookEventRow>(
             r#"SELECT * FROM webhook_events
                WHERE provider = $1 AND event_id = $2"#,
@@ -326,7 +413,11 @@ pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 #[async_trait]
 impl IdempotencyRepository for PgIdempotencyRepository {
-    async fn find_by_key(&self, key: &str, merchant_id: Uuid) -> Result<Option<IdempotencyRow>, DomainError> {
+    async fn find_by_key(
+        &self,
+        key: &str,
+        merchant_id: Uuid,
+    ) -> Result<Option<IdempotencyRow>, DomainError> {
         sqlx::query_as::<_, IdempotencyRow>(
             r#"SELECT idempotency_key, merchant_id, request_hash, payment_id,
                       response_status_code, response_body, created_at, expires_at
@@ -347,48 +438,17 @@ impl IdempotencyRepository for PgIdempotencyRepository {
                      payment_id, response_status_code, response_body, created_at, expires_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#,
         )
-        .bind(&row.idempotency_key).bind(row.merchant_id)
-        .bind(&row.request_hash).bind(row.payment_id)
-        .bind(&row.response_status_code).bind(&row.response_body)
-        .bind(row.created_at).bind(row.expires_at)
+        .bind(&row.idempotency_key)
+        .bind(row.merchant_id)
+        .bind(&row.request_hash)
+        .bind(row.payment_id)
+        .bind(&row.response_status_code)
+        .bind(&row.response_body)
+        .bind(row.created_at)
+        .bind(row.expires_at)
         .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Validation(e.to_string()))?;
         Ok(())
-    }
-}
-                 AND ($2::text IS NULL OR merchant_reference = $2)
-                 AND ($3::text IS NULL OR status = $3)
-                 AND ($4::text IS NULL OR provider = $4)
-               ORDER BY created_at DESC
-               LIMIT $5 OFFSET $6"#,
-        )
-        .bind(criteria.merchant_id)
-        .bind(&criteria.merchant_reference)
-        .bind(&criteria.status)
-        .bind(&criteria.provider)
-        .bind(criteria.limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-
-        let (total,): (i64,) = sqlx::query_as(
-            r#"SELECT COUNT(*) FROM payments WHERE merchant_id = $1
-               AND ($2::text IS NULL OR merchant_reference = $2)
-               AND ($3::text IS NULL OR status = $3)
-               AND ($4::text IS NULL OR provider = $4)"#,
-        )
-        .bind(criteria.merchant_id)
-        .bind(&criteria.merchant_reference)
-        .bind(&criteria.status)
-        .bind(&criteria.provider)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-
-        Ok(PaginatedResult { items, total, page: criteria.page, limit: criteria.limit })
-    }
-}
     }
 }

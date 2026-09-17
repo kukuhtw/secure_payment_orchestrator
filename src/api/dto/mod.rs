@@ -1,6 +1,6 @@
-pub mod payment;
 pub mod error;
+pub mod payment;
 
 // Re-export common DTO types
-pub use payment::*;
 pub use error::*;
+pub use payment::*;

@@ -3,8 +3,8 @@
 //! Representasi status pembayaran, nilai (amount + currency), dan lifecycle.
 //! Domain layer PURE — tidak ada dependensi ke axum, sqlx, atau redis.
 
-use crate::domain::status::PaymentStatus;
 use crate::domain::error::DomainError;
+use crate::domain::status::PaymentStatus;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -38,7 +38,9 @@ impl Money {
             return Err(DomainError::validation("Amount must be greater than 0"));
         }
         if currency.len() != 3 {
-            return Err(DomainError::validation("Currency must be ISO 4217 (3 chars)"));
+            return Err(DomainError::validation(
+                "Currency must be ISO 4217 (3 chars)",
+            ));
         }
         Ok(Self { amount, currency })
     }

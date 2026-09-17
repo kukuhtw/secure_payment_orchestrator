@@ -53,8 +53,7 @@ impl Settings {
                 .unwrap_or_else(|_| "10".into())
                 .parse()?,
             xendit_secret_key: std::env::var("XENDIT_SECRET_KEY").unwrap_or_default(),
-            xendit_callback_token: std::env::var("XENDIT_CALLBACK_TOKEN")
-                .unwrap_or_default(),
+            xendit_callback_token: std::env::var("XENDIT_CALLBACK_TOKEN").unwrap_or_default(),
             xendit_base_url: std::env::var("XENDIT_BASE_URL")
                 .unwrap_or_else(|_| "https://api.xendit.co".into()),
             xendit_timeout_seconds: std::env::var("XENDIT_TIMEOUT_SECONDS")
@@ -71,8 +70,7 @@ impl Settings {
             nicepay_merchant_key: std::env::var("NICEPAY_MERCHANT_KEY").unwrap_or_default(),
             nicepay_base_url: std::env::var("NICEPAY_BASE_URL")
                 .unwrap_or_else(|_| "https://dev.nicepay.co.id".into()),
-            nicepay_pay_method: std::env::var("NICEPAY_PAY_METHOD")
-                .unwrap_or_else(|_| "01".into()),
+            nicepay_pay_method: std::env::var("NICEPAY_PAY_METHOD").unwrap_or_else(|_| "01".into()),
             nicepay_timeout_seconds: std::env::var("NICEPAY_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
                 .parse()?,

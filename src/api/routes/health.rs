@@ -3,9 +3,9 @@
 //! - `GET /health` — Liveness probe
 //! - `GET /ready` — Readiness probe (checks DB + Redis)
 
-use axum::{Json, extract::State};
-use serde::Serialize;
 use crate::SharedState;
+use axum::{extract::State, Json};
+use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -45,7 +45,11 @@ pub async fn readiness_check(
     let ready = db_status == "connected" && redis_status == "connected";
 
     let response = ReadinessResponse {
-        status: if ready { "ready".into() } else { "not_ready".into() },
+        status: if ready {
+            "ready".into()
+        } else {
+            "not_ready".into()
+        },
         database: db_status.into(),
         redis: redis_status.into(),
     };

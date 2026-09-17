@@ -1,10 +1,10 @@
 pub mod postgres;
 pub mod redis;
 
-use sqlx::postgres::PgPoolOptions;
-use redis::aio::ConnectionManager;
-use std::sync::Arc;
 use crate::domain::repositories::*;
+use redis::aio::ConnectionManager;
+use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 
 /// All repository implementations bundled together for easy access.
 pub struct Repositories {
@@ -19,11 +19,21 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
-            api_key: Arc::new(postgres::repositories::PgApiKeyRepository::new(pool.clone())),
-            payment: Arc::new(postgres::repositories::PgPaymentRepository::new(pool.clone())),
-            attempt: Arc::new(postgres::repositories::PgAttemptRepository::new(pool.clone())),
-            idempotency: Arc::new(postgres::repositories::PgIdempotencyRepository::new(pool.clone())),
-            audit_log: Arc::new(postgres::repositories::PgAuditLogRepository::new(pool.clone())),
+            api_key: Arc::new(postgres::repositories::PgApiKeyRepository::new(
+                pool.clone(),
+            )),
+            payment: Arc::new(postgres::repositories::PgPaymentRepository::new(
+                pool.clone(),
+            )),
+            attempt: Arc::new(postgres::repositories::PgAttemptRepository::new(
+                pool.clone(),
+            )),
+            idempotency: Arc::new(postgres::repositories::PgIdempotencyRepository::new(
+                pool.clone(),
+            )),
+            audit_log: Arc::new(postgres::repositories::PgAuditLogRepository::new(
+                pool.clone(),
+            )),
             webhook_event: Arc::new(postgres::repositories::PgWebhookEventRepository::new(pool)),
         }
     }
