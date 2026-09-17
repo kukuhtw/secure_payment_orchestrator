@@ -1,0 +1,37 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Environment / secrets (never commit real credentials)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.iml
+.vs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test / coverage output
+/coverage/
+*.profraw
+*.profdata
+
+# Docker overrides (local only)
+docker-compose.override.yml
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
