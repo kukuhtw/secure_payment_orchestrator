@@ -40,6 +40,8 @@ async fn create_payment(
 ) -> Result<(StatusCode, Json<PaymentResponse>), ApiError> {
     tracing::info!("Create payment: {:?}", req.merchant_reference);
 
+    req.validate()?;
+
     let input = crate::application::payment::CreatePaymentInput {
         idempotency_key,
         merchant_reference: req.merchant_reference,

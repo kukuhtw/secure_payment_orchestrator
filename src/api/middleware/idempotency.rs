@@ -33,6 +33,8 @@ use std::collections::HashMap;
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 /// Request bodies larger than this are rejected before hashing/buffering.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Matches `idempotency_keys.idempotency_key VARCHAR(255)`.
+const IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
 
 /// The validated `Idempotency-Key` header value, attached to request
 /// extensions so handlers don't need to re-parse the header themselves.
@@ -66,6 +68,12 @@ pub async fn require_idempotency_key(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| ApiError::bad_request("Idempotency-Key header is required"))?;
+
+    if idempotency_key.len() > IDEMPOTENCY_KEY_MAX_LEN {
+        return Err(ApiError::bad_request(format!(
+            "Idempotency-Key must be at most {IDEMPOTENCY_KEY_MAX_LEN} characters"
+        )));
+    }
 
     let (parts, body) = req.into_parts();
     let body_bytes = to_bytes(body, MAX_BODY_BYTES)
