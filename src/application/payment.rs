@@ -1,17 +1,15 @@
 //! Payment service — orchestrates payment creation, retrieval, and status updates.
 //!
-//! This layer sits between the HTTP handlers (`api::routes::payment`, not yet
-//! wired to this service) and the domain/infrastructure layers. It is
-//! deliberately decoupled from `AppState`/`Repositories` — it takes only the
-//! collaborators it needs, which also makes it unit-testable with fakes
-//! instead of a real Postgres/provider connection.
+//! This layer sits between the HTTP handlers (`api::routes::payment`) and the
+//! domain/infrastructure layers. It is deliberately decoupled from
+//! `AppState`/`Repositories` — it takes only the collaborators it needs,
+//! which also makes it unit-testable with fakes instead of a real
+//! Postgres/provider connection.
 
 use crate::application::ApplicationError;
 use crate::domain::attempt::{AttemptStatus, AttemptType, PaymentAttempt};
 use crate::domain::payment::{Money, Payment};
-use crate::domain::repositories::{
-    AttemptRepository, AuditLogRepository, AuditLogRow, PaymentRepository,
-};
+use crate::domain::repositories::{AuditLogRow, PaymentRepository, PaymentTransactionRepository};
 use crate::providers::adapter::{PaymentProvider, ProviderRequest};
 use chrono::Utc;
 use std::sync::Arc;
@@ -32,38 +30,36 @@ pub struct CreatePaymentInput {
 
 pub struct PaymentService {
     payment_repo: Arc<dyn PaymentRepository>,
-    attempt_repo: Arc<dyn AttemptRepository>,
-    audit_repo: Arc<dyn AuditLogRepository>,
+    payment_tx: Arc<dyn PaymentTransactionRepository>,
     providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>>,
 }
 
 impl PaymentService {
     pub fn new(
         payment_repo: Arc<dyn PaymentRepository>,
-        attempt_repo: Arc<dyn AttemptRepository>,
-        audit_repo: Arc<dyn AuditLogRepository>,
+        payment_tx: Arc<dyn PaymentTransactionRepository>,
         providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>>,
     ) -> Self {
         Self {
             payment_repo,
-            attempt_repo,
-            audit_repo,
+            payment_tx,
             providers,
         }
     }
 
     /// Validate, pick a provider, create the payment at the provider, then
-    /// persist the payment + initial attempt + audit log.
+    /// persist the payment + initial attempt + audit log atomically (single
+    /// DB transaction via `PaymentTransactionRepository`).
     ///
     /// NOTE: provider selection here is a naive "first available" pick — a
     /// placeholder for the still-open P0 item "Provider selection by
     /// availability/priority" (circuit breaker awareness, priority ordering).
     ///
-    /// NOTE: these three persistence calls are NOT wrapped in a single
-    /// database transaction yet — that is the still-open P0 item "Atomic
-    /// transaction untuk payment, idempotency record, attempt, dan audit
-    /// log". A crash between steps can currently leave a payment without its
-    /// attempt/audit rows.
+    /// NOTE: the `idempotency_keys` row is NOT part of this transaction —
+    /// persisting it needs the request hash (computed in the idempotency
+    /// middleware) and the serialized response body (built in the HTTP
+    /// handler after this returns), neither of which this service has. That
+    /// remains a separate follow-up.
     pub async fn create_payment(
         &self,
         merchant_id: Uuid,
@@ -98,8 +94,6 @@ impl PaymentService {
         payment.provider = Some(provider.name().to_string());
         payment.payment_url = provider_response.payment_url.clone();
 
-        self.payment_repo.create(&payment).await?;
-
         let now = Utc::now();
         let attempt = PaymentAttempt {
             id: Uuid::new_v4(),
@@ -120,29 +114,29 @@ impl PaymentService {
             completed_at: Some(now),
             created_at: now,
         };
-        self.attempt_repo.save(&attempt).await?;
 
-        // Audit logging is done directly against the repository for now —
-        // `application::audit` (a dedicated service that could enrich this
-        // with correlation_id/ip_address from request context) is still a
-        // skeleton.
-        self.audit_repo
-            .log(&AuditLogRow {
-                id: Uuid::new_v4(),
-                merchant_id: Some(merchant_id),
-                payment_id: Some(payment.id),
-                entity_id: Some(payment.id),
-                entity_type: "PAYMENT".into(),
-                action: "CREATE".into(),
-                actor: actor_api_key_id.to_string(),
-                field_name: None,
-                old_value: None,
-                new_value: Some(payment.status.to_string()),
-                metadata: None,
-                ip_address: None,
-                correlation_id: None,
-                created_at: now,
-            })
+        // Audit logging is done directly here for now — `application::audit`
+        // (a dedicated service that could enrich this with correlation_id/
+        // ip_address from request context) is still a skeleton.
+        let audit = AuditLogRow {
+            id: Uuid::new_v4(),
+            merchant_id: Some(merchant_id),
+            payment_id: Some(payment.id),
+            entity_id: Some(payment.id),
+            entity_type: "PAYMENT".into(),
+            action: "CREATE".into(),
+            actor: actor_api_key_id.to_string(),
+            field_name: None,
+            old_value: None,
+            new_value: Some(payment.status.to_string()),
+            metadata: None,
+            ip_address: None,
+            correlation_id: None,
+            created_at: now,
+        };
+
+        self.payment_tx
+            .create_with_attempt_and_audit(&payment, &attempt, &audit)
             .await?;
 
         Ok(payment)
@@ -164,7 +158,6 @@ impl PaymentService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::attempt::PaymentAttempt as DomainPaymentAttempt;
     use crate::domain::error::DomainError;
     use crate::domain::repositories::{
         PaginatedResult, PaymentRow, PaymentSummaryRow, SearchCriteria,
@@ -174,16 +167,12 @@ mod tests {
     use std::sync::Mutex;
 
     struct FakePaymentRepository {
-        created: Mutex<Vec<Payment>>,
-        fail_create: bool,
         get_by_id_result: Mutex<Option<Result<PaymentRow, ()>>>,
     }
 
     impl FakePaymentRepository {
         fn new() -> Self {
             Self {
-                created: Mutex::new(Vec::new()),
-                fail_create: false,
                 get_by_id_result: Mutex::new(None),
             }
         }
@@ -191,12 +180,8 @@ mod tests {
 
     #[async_trait]
     impl PaymentRepository for FakePaymentRepository {
-        async fn create(&self, payment: &Payment) -> Result<(), DomainError> {
-            if self.fail_create {
-                return Err(DomainError::Validation("forced failure".into()));
-            }
-            self.created.lock().unwrap().push(payment.clone());
-            Ok(())
+        async fn create(&self, _payment: &Payment) -> Result<(), DomainError> {
+            unimplemented!("create_payment now goes through PaymentTransactionRepository")
         }
 
         async fn get_by_id(
@@ -227,45 +212,43 @@ mod tests {
         }
     }
 
-    struct FakeAttemptRepository {
-        saved: Mutex<Vec<DomainPaymentAttempt>>,
+    struct FakePaymentTransactionRepository {
+        calls: Mutex<Vec<(Payment, PaymentAttempt, AuditLogRow)>>,
+        fail: bool,
+    }
+
+    impl FakePaymentTransactionRepository {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                fail: true,
+            }
+        }
     }
 
     #[async_trait]
-    impl AttemptRepository for FakeAttemptRepository {
-        async fn save(&self, attempt: &DomainPaymentAttempt) -> Result<(), DomainError> {
-            self.saved.lock().unwrap().push(attempt.clone());
-            Ok(())
-        }
-
-        async fn get_by_payment_id(
+    impl PaymentTransactionRepository for FakePaymentTransactionRepository {
+        async fn create_with_attempt_and_audit(
             &self,
-            _payment_id: Uuid,
-        ) -> Result<Vec<DomainPaymentAttempt>, DomainError> {
-            unimplemented!("not exercised by these tests")
-        }
-
-        async fn count_attempts(&self, _payment_id: Uuid) -> Result<i32, DomainError> {
-            unimplemented!("not exercised by these tests")
-        }
-    }
-
-    struct FakeAuditLogRepository {
-        logged: Mutex<Vec<AuditLogRow>>,
-    }
-
-    #[async_trait]
-    impl AuditLogRepository for FakeAuditLogRepository {
-        async fn log(&self, row: &AuditLogRow) -> Result<(), DomainError> {
-            self.logged.lock().unwrap().push(row.clone());
+            payment: &Payment,
+            attempt: &PaymentAttempt,
+            audit: &AuditLogRow,
+        ) -> Result<(), DomainError> {
+            if self.fail {
+                return Err(DomainError::Validation("forced failure".into()));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((payment.clone(), attempt.clone(), audit.clone()));
             Ok(())
-        }
-
-        async fn get_by_payment_id(
-            &self,
-            _payment_id: Uuid,
-        ) -> Result<Vec<AuditLogRow>, DomainError> {
-            unimplemented!("not exercised by these tests")
         }
     }
 
@@ -321,14 +304,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_payment_persists_payment_attempt_and_audit_log() {
+    async fn create_payment_persists_payment_attempt_and_audit_atomically() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
             Arc::new(RwLock::new(vec![available_provider(|| {
                 Ok(ProviderResponse {
@@ -339,12 +317,7 @@ mod tests {
                 })
             })]));
 
-        let service = PaymentService::new(
-            payment_repo.clone(),
-            attempt_repo.clone(),
-            audit_repo.clone(),
-            providers,
-        );
+        let service = PaymentService::new(payment_repo.clone(), payment_tx.clone(), providers);
 
         let merchant_id = Uuid::new_v4();
         let actor = Uuid::new_v4();
@@ -360,28 +333,21 @@ mod tests {
             Some("https://pay.example/prov_123")
         );
 
-        assert_eq!(payment_repo.created.lock().unwrap().len(), 1);
-        assert_eq!(attempt_repo.saved.lock().unwrap().len(), 1);
-        assert_eq!(audit_repo.logged.lock().unwrap().len(), 1);
-        assert_eq!(
-            audit_repo.logged.lock().unwrap()[0].actor,
-            actor.to_string()
-        );
+        let calls = payment_tx.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (tx_payment, tx_attempt, tx_audit) = &calls[0];
+        assert_eq!(tx_payment.id, payment.id);
+        assert_eq!(tx_attempt.payment_id, payment.id);
+        assert_eq!(tx_audit.actor, actor.to_string());
     }
 
     #[tokio::test]
-    async fn create_payment_rejects_invalid_amount_without_touching_repos() {
+    async fn create_payment_rejects_invalid_amount_without_touching_transaction() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![]));
 
-        let service =
-            PaymentService::new(payment_repo.clone(), attempt_repo, audit_repo, providers);
+        let service = PaymentService::new(payment_repo.clone(), payment_tx.clone(), providers);
 
         let mut input = sample_input();
         input.amount = 0;
@@ -391,18 +357,13 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(ApplicationError::Domain(_))));
-        assert_eq!(payment_repo.created.lock().unwrap().len(), 0);
+        assert_eq!(payment_tx.calls.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
     async fn create_payment_fails_when_no_provider_available() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
             Arc::new(RwLock::new(vec![Box::new(FakeProvider {
                 name: "MIDTRANS",
@@ -410,7 +371,7 @@ mod tests {
                 create_fn: Box::new(|| unreachable!("unavailable provider must not be called")),
             })]));
 
-        let service = PaymentService::new(payment_repo, attempt_repo, audit_repo, providers);
+        let service = PaymentService::new(payment_repo, payment_tx, providers);
 
         let result = service
             .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
@@ -422,26 +383,43 @@ mod tests {
     #[tokio::test]
     async fn create_payment_propagates_provider_error_without_persisting() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
             Arc::new(RwLock::new(vec![available_provider(|| {
                 Err(ProviderError::Unavailable)
             })]));
 
-        let service =
-            PaymentService::new(payment_repo.clone(), attempt_repo, audit_repo, providers);
+        let service = PaymentService::new(payment_repo, payment_tx.clone(), providers);
 
         let result = service
             .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
             .await;
 
         assert!(matches!(result, Err(ApplicationError::Provider(_))));
-        assert_eq!(payment_repo.created.lock().unwrap().len(), 0);
+        assert_eq!(payment_tx.calls.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_payment_propagates_transaction_failure() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::failing());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
+            Arc::new(RwLock::new(vec![available_provider(|| {
+                Ok(ProviderResponse {
+                    provider_payment_id: "prov_123".into(),
+                    provider_status: "PENDING".into(),
+                    payment_url: Some("https://pay.example/prov_123".into()),
+                    raw_response: None,
+                })
+            })]));
+
+        let service = PaymentService::new(payment_repo, payment_tx, providers);
+
+        let result = service
+            .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
+            .await;
+
+        assert!(matches!(result, Err(ApplicationError::Domain(_))));
     }
 
     #[tokio::test]
@@ -469,15 +447,10 @@ mod tests {
             completed_at: None,
         }));
 
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![]));
 
-        let service = PaymentService::new(payment_repo, attempt_repo, audit_repo, providers);
+        let service = PaymentService::new(payment_repo, payment_tx, providers);
 
         let payment = service
             .get_payment(merchant_id, payment_id)
@@ -491,15 +464,10 @@ mod tests {
     #[tokio::test]
     async fn get_payment_propagates_not_found() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
-        let attempt_repo = Arc::new(FakeAttemptRepository {
-            saved: Mutex::new(Vec::new()),
-        });
-        let audit_repo = Arc::new(FakeAuditLogRepository {
-            logged: Mutex::new(Vec::new()),
-        });
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
         let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![]));
 
-        let service = PaymentService::new(payment_repo, attempt_repo, audit_repo, providers);
+        let service = PaymentService::new(payment_repo, payment_tx, providers);
 
         let result = service.get_payment(Uuid::new_v4(), Uuid::new_v4()).await;
 

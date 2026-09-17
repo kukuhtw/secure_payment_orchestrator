@@ -64,39 +64,119 @@ impl PgPaymentRepository {
     }
 }
 
+/// Shared by `PgPaymentRepository::create` (single `&PgPool`) and
+/// `PgPaymentTransactionRepository::create_with_attempt_and_audit` (an open
+/// `Transaction`) — anything implementing `sqlx::Executor` works.
+async fn insert_payment<'e, E>(executor: E, payment: &Payment) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"INSERT INTO payments (id, merchant_id, idempotency_key, merchant_reference,
+                 currency, amount, description, status, provider, payment_url,
+                 created_by_api_key_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+    )
+    .bind(payment.id)
+    .bind(payment.merchant_id)
+    .bind(&payment.idempotency_key)
+    .bind(&payment.merchant_reference)
+    .bind(&payment.amount.currency)
+    .bind(payment.amount.amount)
+    .bind(&payment.description)
+    .bind(payment.status.to_string())
+    .bind(&payment.provider)
+    .bind(&payment.payment_url)
+    .bind(None::<Uuid>)
+    .bind(payment.created_at)
+    .bind(payment.updated_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+fn map_payment_insert_error(e: sqlx::Error) -> DomainError {
+    if let sqlx::Error::Database(ref db) = &e {
+        if db.constraint() == Some("uq_payments_idempotency") {
+            return DomainError::conflict("Idempotency key already exists");
+        }
+    }
+    DomainError::Validation(e.to_string())
+}
+
+/// Shared by `PgAttemptRepository::save` and
+/// `PgPaymentTransactionRepository::create_with_attempt_and_audit`.
+async fn insert_attempt<'e, E>(executor: E, attempt: &PaymentAttempt) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"INSERT INTO payment_attempts (id, payment_id, provider, provider_payment_id,
+                 provider_status, status, attempt_type, attempt_number,
+                 request_snapshot, response_snapshot, http_status_code,
+                 error_code, error_message, duration_ms, started_at,
+                 completed_at, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
+    )
+    .bind(attempt.id)
+    .bind(attempt.payment_id)
+    .bind(&attempt.provider)
+    .bind(&attempt.provider_payment_id)
+    .bind(&attempt.provider_status)
+    .bind(attempt.status.to_string())
+    .bind(attempt.attempt_type.to_string())
+    .bind(attempt.attempt_number)
+    .bind(&attempt.request_snapshot)
+    .bind(&attempt.response_snapshot)
+    .bind(attempt.http_status_code)
+    .bind(&attempt.error_code)
+    .bind(&attempt.error_message)
+    .bind(attempt.duration_ms)
+    .bind(attempt.started_at)
+    .bind(attempt.completed_at)
+    .bind(attempt.created_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Shared by `PgAuditLogRepository::log` and
+/// `PgPaymentTransactionRepository::create_with_attempt_and_audit`.
+async fn insert_audit_log<'e, E>(executor: E, row: &AuditLogRow) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, merchant_id, payment_id, entity_id, entity_type,
+                 action, actor, field_name, old_value, new_value, metadata,
+                 ip_address, correlation_id, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"#,
+    )
+    .bind(row.id)
+    .bind(row.merchant_id)
+    .bind(row.payment_id)
+    .bind(row.entity_id)
+    .bind(&row.entity_type)
+    .bind(&row.action)
+    .bind(&row.actor)
+    .bind(&row.field_name)
+    .bind(&row.old_value)
+    .bind(&row.new_value)
+    .bind(&row.metadata)
+    .bind(&row.ip_address)
+    .bind(&row.correlation_id)
+    .bind(row.created_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl PaymentRepository for PgPaymentRepository {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"INSERT INTO payments (id, merchant_id, idempotency_key, merchant_reference,
-                     currency, amount, description, status, provider, payment_url,
-                     created_by_api_key_id, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
-        )
-        .bind(payment.id)
-        .bind(payment.merchant_id)
-        .bind(&payment.idempotency_key)
-        .bind(&payment.merchant_reference)
-        .bind(&payment.amount.currency)
-        .bind(payment.amount.amount)
-        .bind(&payment.description)
-        .bind(payment.status.to_string())
-        .bind(&payment.provider)
-        .bind(&payment.payment_url)
-        .bind(None::<Uuid>)
-        .bind(payment.created_at)
-        .bind(payment.updated_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            if let sqlx::Error::Database(ref db) = &e {
-                if db.constraint() == Some("uq_payments_idempotency") {
-                    return DomainError::conflict("Idempotency key already exists");
-                }
-            }
-            DomainError::Validation(e.to_string())
-        })?;
-        Ok(())
+        insert_payment(&self.pool, payment)
+            .await
+            .map_err(map_payment_insert_error)
     }
 
     async fn get_by_id(&self, id: Uuid, merchant_id: Uuid) -> Result<PaymentRow, DomainError> {
@@ -201,35 +281,9 @@ impl PgAttemptRepository {
 #[async_trait]
 impl AttemptRepository for PgAttemptRepository {
     async fn save(&self, attempt: &PaymentAttempt) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"INSERT INTO payment_attempts (id, payment_id, provider, provider_payment_id,
-                     provider_status, status, attempt_type, attempt_number,
-                     request_snapshot, response_snapshot, http_status_code,
-                     error_code, error_message, duration_ms, started_at,
-                     completed_at, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
-        )
-        .bind(attempt.id)
-        .bind(attempt.payment_id)
-        .bind(&attempt.provider)
-        .bind(&attempt.provider_payment_id)
-        .bind(&attempt.provider_status)
-        .bind(attempt.status.to_string())
-        .bind(attempt.attempt_type.to_string())
-        .bind(attempt.attempt_number)
-        .bind(&attempt.request_snapshot)
-        .bind(&attempt.response_snapshot)
-        .bind(attempt.http_status_code)
-        .bind(&attempt.error_code)
-        .bind(&attempt.error_message)
-        .bind(attempt.duration_ms)
-        .bind(attempt.started_at)
-        .bind(attempt.completed_at)
-        .bind(attempt.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-        Ok(())
+        insert_attempt(&self.pool, attempt)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))
     }
 
     async fn get_by_payment_id(
@@ -289,30 +343,9 @@ impl PgAuditLogRepository {
 #[async_trait]
 impl AuditLogRepository for PgAuditLogRepository {
     async fn log(&self, row: &AuditLogRow) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"INSERT INTO audit_logs (id, merchant_id, payment_id, entity_id, entity_type,
-                     action, actor, field_name, old_value, new_value, metadata,
-                     ip_address, correlation_id, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"#,
-        )
-        .bind(row.id)
-        .bind(row.merchant_id)
-        .bind(row.payment_id)
-        .bind(row.entity_id)
-        .bind(&row.entity_type)
-        .bind(&row.action)
-        .bind(&row.actor)
-        .bind(&row.field_name)
-        .bind(&row.old_value)
-        .bind(&row.new_value)
-        .bind(&row.metadata)
-        .bind(&row.ip_address)
-        .bind(&row.correlation_id)
-        .bind(row.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-        Ok(())
+        insert_audit_log(&self.pool, row)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))
     }
 
     async fn get_by_payment_id(&self, payment_id: Uuid) -> Result<Vec<AuditLogRow>, DomainError> {
@@ -449,6 +482,52 @@ impl IdempotencyRepository for PgIdempotencyRepository {
         .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Validation(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// ─── Payment Transaction Repository (atomic create) ─────
+
+pub struct PgPaymentTransactionRepository {
+    pool: PgPool,
+}
+
+impl PgPaymentTransactionRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl PaymentTransactionRepository for PgPaymentTransactionRepository {
+    async fn create_with_attempt_and_audit(
+        &self,
+        payment: &Payment,
+        attempt: &PaymentAttempt,
+        audit: &AuditLogRow,
+    ) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        insert_payment(&mut *tx, payment)
+            .await
+            .map_err(map_payment_insert_error)?;
+
+        insert_attempt(&mut *tx, attempt)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        insert_audit_log(&mut *tx, audit)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
         Ok(())
     }
 }

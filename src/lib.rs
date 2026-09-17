@@ -46,8 +46,7 @@ impl AppState {
         let providers = Arc::new(RwLock::new(providers));
         let payment_service = application::payment::PaymentService::new(
             repos.payment.clone(),
-            repos.attempt.clone(),
-            repos.audit_log.clone(),
+            repos.payment_tx.clone(),
             providers.clone(),
         );
 

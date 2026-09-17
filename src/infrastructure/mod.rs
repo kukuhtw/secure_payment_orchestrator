@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub struct Repositories {
     pub api_key: Arc<dyn ApiKeyRepository>,
     pub payment: Arc<dyn PaymentRepository>,
+    pub payment_tx: Arc<dyn PaymentTransactionRepository>,
     pub attempt: Arc<dyn AttemptRepository>,
     pub idempotency: Arc<dyn IdempotencyRepository>,
     pub audit_log: Arc<dyn AuditLogRepository>,
@@ -23,6 +24,9 @@ impl Repositories {
                 pool.clone(),
             )),
             payment: Arc::new(postgres::repositories::PgPaymentRepository::new(
+                pool.clone(),
+            )),
+            payment_tx: Arc::new(postgres::repositories::PgPaymentTransactionRepository::new(
                 pool.clone(),
             )),
             attempt: Arc::new(postgres::repositories::PgAttemptRepository::new(

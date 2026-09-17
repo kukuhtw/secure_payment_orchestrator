@@ -197,3 +197,19 @@ pub trait PaymentRepository: Send + Sync {
         criteria: &SearchCriteria,
     ) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError>;
 }
+
+// ─── Payment Transaction (atomic create) ─────────────────
+
+#[async_trait]
+pub trait PaymentTransactionRepository: Send + Sync {
+    /// Persist a new payment, its initial attempt, and an audit log entry
+    /// atomically — all three succeed or all three roll back together.
+    /// Used by `PaymentService::create_payment` instead of three separate
+    /// `PaymentRepository`/`AttemptRepository`/`AuditLogRepository` calls.
+    async fn create_with_attempt_and_audit(
+        &self,
+        payment: &Payment,
+        attempt: &PaymentAttempt,
+        audit: &AuditLogRow,
+    ) -> Result<(), DomainError>;
+}
