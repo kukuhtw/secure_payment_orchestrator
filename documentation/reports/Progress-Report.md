@@ -4,51 +4,59 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi report | 4.0 |
+| Versi report | 5.0 |
 | Tanggal audit | 17 September 2026 |
 | Status produk | Proof of Concept, belum production-ready |
 | Dasar penilaian | `cargo build`, `cargo test`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
-| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin), `cargo test` sukses (5/5 test lulus), `cargo fmt -- --check` lulus tanpa isu |
+| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin), `cargo test` sukses (13/13 test lulus), `cargo fmt -- --check` lulus tanpa isu |
 
 ## 1. Ringkasan Eksekutif
 
 Fondasi proyek sudah tersedia: struktur aplikasi Rust, domain model, state machine,
 PostgreSQL repositories, Redis lock helper, kontrak provider, empat provider adapter
-(Midtrans/Alpha, Xendit/Beta, DOKU/Gamma, NICEPAY), konfigurasi, dokumentasi API, dan
-container setup.
+(Midtrans/Alpha, Xendit/Beta, DOKU/Gamma, NICEPAY), konfigurasi, dokumentasi API,
+container setup, dan — baru pada pass ini — **authentication middleware yang berfungsi**.
 
-Sejak audit v3.0, seluruh **12 compile error** yang ditemukan sudah diperbaiki, ditambah
-**3 bug lain** yang baru terlihat setelah lib berhasil dikompilasi (compiler baru bisa
-memeriksa binary target `main.rs` setelah lib lulus). `spo-api` sekarang **berhasil
-dikompilasi secara penuh** (`cargo build`, `cargo test`, `cargo fmt -- --check` semuanya
-lulus) untuk pertama kalinya sejak report ini dibuat. Detail perbaikan ada di §3 dan §9.
+Pass v5.0 mengimplementasikan P0 item pertama: authentication middleware. Alurnya
+lengkap — parse `Authorization: Bearer <api_key>`, ambil `key_prefix` (≤10 karakter,
+cocok dengan kolom `api_keys.key_prefix VARCHAR(10)`), lookup ke `ApiKeyRepository`,
+verifikasi hash Argon2 secara constant-time, pastikan merchant `ACTIVE`, lalu
+attach `MerchantContext` (merchant_id, api_key_id, permissions) ke request extensions
+agar bisa dikonsumsi handler/service berikutnya. Middleware ini **hanya** dipasang pada
+route payment (`/api/v1/payments*`) — bukan `/health`, `/ready`, `/metrics` (public), atau
+webhook (yang diautentikasi via HMAC signature, bukan API key merchant), sesuai kontrak
+di `documentation/api/API-Contract-Secure-Payment-Orchestrator.md` §1.2.
 
-Ini adalah perbaikan compile blocker murni — **tidak ada logika bisnis baru yang
-ditambahkan**. Alur bisnis utama masih belum tersambung end-to-end: seluruh payment
-handler utama, webhook handler, application service, authentication, idempotency
-middleware, sebagian besar security implementation, retry, reconciliation, circuit
-breaker, dan automated test masih berupa skeleton atau belum dibuat.
+**Keterbatasan verifikasi:** environment ini tidak punya Docker/Postgres, dan migration
+tidak menyertakan seed data `api_keys` (hanya `merchants`), jadi alur ini belum bisa
+ditest end-to-end terhadap database sungguhan. Yang terverifikasi lewat `cargo test`
+adalah unit logic murni: parsing Bearer token, ekstraksi key prefix, dan roundtrip
+hash/verify Argon2 (8 test baru, ditambah 5 test provider yang sudah ada — total 13/13
+lulus). Lihat §7 untuk risiko yang masih terbuka.
+
+Tidak ada logika bisnis lain yang ditambahkan pada pass ini di luar authentication
+middleware. Alur bisnis utama lainnya masih belum tersambung end-to-end: seluruh payment
+handler, webhook handler, application service, idempotency middleware, sebagian besar
+security implementation lain, retry, reconciliation, circuit breaker, dan sebagian besar
+automated test masih berupa skeleton atau belum dibuat.
 
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 21 | 35% |
-| Parsial | 13 | 22% |
-| Belum | 26 | 43% |
+| Selesai | 23 | 38% |
+| Parsial | 14 | 23% |
+| Belum | 23 | 38% |
 | **Total** | **60** | **100%** |
 
-Dibanding v3.0 (15 selesai / 17 parsial / 28 belum), enam task naik status karena compile
-blocker-nya sudah diperbaiki dan terverifikasi lulus `cargo build`: Cargo project/module
-structure, PostgreSQL pool wiring, Redis client setup, PostgreSQL repository
-implementation, Redis distributed lock helper, dan Logging initialization — semuanya naik
-ke Selesai. Prometheus exporter naik dari Belum ke Parsial (recorder terpasang dan
-`/metrics` merender output asli, tetapi belum ada metric yang direkam dari application
-layer). Tidak ada task yang turun status pada pass ini.
+Dibanding v4.0 (21 selesai / 13 parsial / 26 belum), tiga task naik status: Authentication
+middleware dan API-key hashing/verification naik ke Selesai, dan Merchant
+authentication/authorization naik dari Belum ke Parsial (identifikasi merchant sudah
+jalan; otorisasi granular per-permission belum diterapkan karena handler-nya sendiri
+belum ada). Tidak ada task yang turun status pada pass ini.
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
 kesiapan production. Core payment flow **masih** belum dapat digunakan: handler API
-masih mengembalikan `NOT_IMPLEMENTED`. Yang berubah adalah source sekarang bisa
-dikompilasi dan ditest — prasyarat dasar sebelum fitur apa pun bisa dikerjakan dan
-diverifikasi dengan `cargo test`.
+masih mengembalikan `NOT_IMPLEMENTED` — middleware auth sudah siap melindunginya begitu
+handler tersebut diimplementasikan.
 
 ## 2. Definisi Status
 
@@ -94,13 +102,13 @@ diverifikasi dengan `cargo test`.
 | Atomic business transaction | Parsial (tidak diubah pada pass ini) | Tidak ditemukan pemakaian `sqlx::Transaction`/`.begin()` di source manapun; create payment, audit log, dan idempotency record masih 3 query terpisah tanpa pembungkus transaksi — ini backlog fitur (P0), bukan compile blocker |
 | Concurrency protection | Parsial (tidak diubah pada pass ini) | Redis lock helper sekarang compile bersih (lihat §3.6), tetapi masih belum dipakai oleh payment/webhook/reconciliation flow — `application/*.rs` masih skeleton satu baris |
 
-### 3.4 Core Payment API — 0 selesai, 1 parsial, 7 belum
+### 3.4 Core Payment API — 1 selesai, 1 parsial, 6 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Request/response DTO | Parsial | Struct lengkap di `src/api/dto/payment.rs`; validation belum diterapkan pada handler |
-| Authentication middleware | Belum | `src/api/middleware/authentication.rs` hanya doc comment. Diperbaiki: `api/mod.rs` sekarang memanggil `middleware::auth_layer()` yang benar-benar ada (didefinisikan di `middleware/mod.rs` sebagai `tower::layer::util::Identity` — placeholder pass-through, bukan auth sungguhan), bukan `middleware::authentication::auth_layer()` yang memang tidak pernah ada di submodule itu. Router compile, tetapi tidak ada enforcement auth apa pun |
-| Idempotency middleware | Belum | Sama seperti di atas — `idempotency_layer()` sekarang dipanggil dari path yang benar (`middleware::idempotency_layer()`), tetap berupa `Identity` pass-through tanpa logika |
+| Authentication middleware | Selesai | `src/api/middleware/authentication.rs::require_api_key` — validasi `Authorization: Bearer`, lookup `key_prefix`, verifikasi Argon2 constant-time (`security::hash::verify_secret`), cek merchant `ACTIVE`, attach `MerchantContext` ke request extensions. Dipasang hanya pada payment routes via `axum::middleware::from_fn_with_state` di `api/mod.rs` (bukan global — health/ready/metrics/webhook tidak terpengaruh). **Belum ditest end-to-end** (tidak ada Postgres/Docker di environment ini, migration tidak seed `api_keys`); hanya unit test pure-logic yang lulus (lihat §3.7, §3.9) |
+| Idempotency middleware | Belum | `src/api/middleware/idempotency.rs` hanya doc comment; `idempotency_layer()` di `middleware/mod.rs` tetap berupa `Identity` pass-through tanpa logika — di luar scope pass ini |
 | Create payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` (`src/api/routes/payment.rs`) |
 | Get payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 | Search payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
@@ -132,13 +140,13 @@ diverifikasi dengan `cargo test`.
 | Reconciliation endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 | Late-webhook conflict handling | Belum | Belum ada processing implementation |
 
-### 3.7 Security dan webhook — 0 selesai, 1 parsial, 5 belum
+### 3.7 Security dan webhook — 1 selesai, 2 parsial, 3 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Security algorithm/design | Parsial | Argon2, HMAC-SHA256, timestamp, dan constant-time intent terdokumentasi di doc comment (`security/api_key.rs`, `security/hash.rs`, `security/webhook_sig.rs`) |
-| API-key hashing dan verification | Belum | `src/security/api_key.rs` dan `hash.rs` hanya doc comment, tidak ada implementasi |
-| Merchant authentication/authorization | Belum | Middleware belum diimplementasikan |
+| Security algorithm/design | Parsial | Bagian API key (Argon2 + constant-time) sudah diimplementasikan; bagian HMAC-SHA256 webhook (`security/webhook_sig.rs`) masih doc comment intent saja |
+| API-key hashing dan verification | Selesai | `src/security/hash.rs::hash_secret`/`verify_secret` (Argon2id, `PasswordVerifier` yang inheren constant-time) dan `src/security/api_key.rs::parse_bearer_token`/`key_prefix`; 8 unit test lulus (roundtrip, wrong-secret, malformed hash, bearer parsing, key prefix) |
+| Merchant authentication/authorization | Parsial (naik dari Belum) | Merchant diidentifikasi dan discoping via `MerchantContext` (§3.4) setelah API key tervalidasi; otorisasi granular per-permission (`standard`/`operations`/`admin`) belum diterapkan di level route karena handler yang dilindungi (retry/reconcile) sendiri masih `NOT_IMPLEMENTED` |
 | Webhook signature verification | Belum | `src/security/webhook_sig.rs` hanya doc comment |
 | Webhook replay/duplicate processing | Belum | DB unique constraint tersedia (`uq_webhook_events_provider_event`), tetapi service belum ada |
 | Webhook route processing | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
@@ -180,7 +188,8 @@ diverifikasi dengan `cargo test`.
 11. PostgreSQL pool creation dan Redis client setup (path/naming bug diperbaiki).
 12. Redis distributed lock helper (compile bug diperbaiki).
 13. Structured JSON logging initialization.
-14. `spo-api` compile bersih: `cargo build`, `cargo test` (5/5 lulus), dan `cargo fmt -- --check` semuanya lulus.
+14. `spo-api` compile bersih: `cargo build`, `cargo test` (13/13 lulus), dan `cargo fmt -- --check` semuanya lulus.
+15. Authentication middleware — Argon2 API-key verification, merchant context, dipasang hanya pada payment routes (belum ditest end-to-end, lihat §3.4 dan §7).
 
 ## 5. Daftar yang Belum Selesai
 
@@ -191,14 +200,15 @@ tidak bisa dikompilasi.
 
 ### Prioritas P0 — agar core payment flow dapat berjalan
 
-1. Authentication middleware dan merchant context (saat ini `Identity` pass-through, belum ada verifikasi apa pun).
-2. API-key hashing/verification.
-3. Request validation.
-4. Payment application service.
-5. Provider selection dan invocation.
-6. Create, get, search, dan cancel payment handlers.
-7. Idempotency flow dengan Redis lock dan DB constraint (saat ini `Identity` pass-through).
-8. Atomic transaction untuk payment, idempotency record, attempt, dan audit log.
+1. ~~Authentication middleware dan merchant context.~~ **Selesai pada v5.0** — lihat §3.4, §3.7. Belum ditest terhadap database sungguhan.
+2. ~~API-key hashing/verification.~~ **Selesai pada v5.0.**
+3. Seed/tooling untuk membuat API key (migration hanya seed `merchants`, tidak ada `api_keys` — perlu untuk testing end-to-end).
+4. Request validation.
+5. Payment application service.
+6. Provider selection dan invocation.
+7. Create, get, search, dan cancel payment handlers (perlu mengonsumsi `MerchantContext` dari request extensions untuk scoping per-merchant).
+8. Idempotency flow dengan Redis lock dan DB constraint (saat ini `Identity` pass-through).
+9. Atomic transaction untuk payment, idempotency record, attempt, dan audit log.
 
 ### Prioritas P1 — reliability dan fallback
 
@@ -246,10 +256,11 @@ Milestone berikutnya dapat dianggap selesai jika:
 
 | Risiko / blocker | Dampak | Tindakan |
 | --- | --- | --- |
-| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment meskipun source sudah compile | Selesaikan P0 di §5 secara berurutan |
-| Authentication & idempotency middleware masih `Identity` pass-through | Tidak ada proteksi apa pun jika endpoint diekspos apa adanya | Jangan deploy; implementasikan sebelum endpoint dibuka |
+| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment meskipun source sudah compile dan auth middleware sudah siap | Selesaikan P0 di §5 secara berurutan |
+| Authentication middleware belum ditest terhadap database sungguhan | Bug logic (mis. salah tangani expired/revoked key) berpotensi belum terdeteksi meski unit test pure-logic lulus | Jalankan integration test begitu Postgres tersedia; migration perlu seed/tooling API key (lihat P0 §5) |
+| Idempotency middleware masih `Identity` pass-through | Tidak ada proteksi duplicate request jika endpoint diekspos apa adanya | Jangan deploy; implementasikan sebelum endpoint dibuka |
 | README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
-| Automated test masih sangat terbatas (5 unit test provider) | Regression dan correctness belum terukur untuk domain/API/webhook | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
+| Automated test masih terbatas (13 unit test: 5 provider + 8 security) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
 | `cargo clippy` belum pernah dijalankan | Lint issue/anti-pattern berpotensi belum terdeteksi | Jalankan `cargo clippy` sebelum CI dibuat |
 | Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
 | Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
@@ -259,12 +270,13 @@ Milestone berikutnya dapat dianggap selesai jika:
 | Pemeriksaan | Hasil |
 | --- | --- |
 | `cargo build` (lib + bin) | **Lulus** — 0 error, hanya warning kosmetik (`unused variable`, `dead_code` pada fungsi yang memang belum dipakai) |
-| `cargo test` | **Lulus** — 5/5 test passed (mapping status Midtrans, Xendit, DOKU ×2, NICEPAY); 0 failed |
+| `cargo test` | **Lulus** — 13/13 test passed (5 provider status-mapping + 8 security: hash roundtrip/wrong-secret/malformed, bearer parsing, key prefix); 0 failed |
 | `cargo fmt -- --check` | **Lulus**, tidak ada isu format |
 | `cargo clippy` | Belum dijalankan pada pass ini — masuk backlog P3 |
-| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, application services, security files, dan test file (`tests/api`, `tests/providers`) |
+| Authentication middleware end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini, dan migration tidak seed `api_keys`. Hanya pure-logic unit test yang lulus |
+| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, application services, idempotency middleware, dan test file (`tests/api`, `tests/providers`) |
 | Payment API runtime implementation | Belum tersedia |
-| Automated test implementation | Terbatas pada unit test provider (5 test); domain/API/webhook/concurrency test belum ada |
+| Automated test implementation | Terbatas pada unit test provider + security (13 test); domain/API/webhook/concurrency/integration test belum ada |
 | Production readiness | Tidak siap |
 
 ## 9. Changelog
@@ -276,3 +288,4 @@ Milestone berikutnya dapat dianggap selesai jika:
 | 2.0 | 17 September 2026 | Audit ulang berdasarkan implementasi aktual, klasifikasi selesai/parsial/belum, dan penambahan backlog fallback |
 | 3.0 | 17 September 2026 | Audit ulang dengan `cargo build`/`cargo test --no-run`/`cargo fmt -- --check` sungguhan (registry tersedia); ditemukan root cause konkret untuk 12 compile error; status Redis client setup dan Redis lock helper diturunkan dari Selesai ke Parsial; ditambahkan daftar P0-blocker |
 | 4.0 | 17 September 2026 | Seluruh 12 compile error v3.0 diperbaiki, ditambah 3 bug baru yang baru terlihat setelah lib compile: (1) `main.rs` memanggil `api::routes::build_router` padahal fungsinya di `api::build_router`; (2) `settings` dipakai setelah di-*move* ke `AppState::new` (borrow checker error); (3) koreksi diagnosis v3.0 — `auth_layer`/`idempotency_layer`/`request_id_layer` ternyata **sudah** didefinisikan (di `middleware/mod.rs` sebagai `Identity` placeholder), bug sebenarnya adalah `api/mod.rs` memanggil path submodule yang salah, bukan fungsi yang "tidak pernah didefinisikan" seperti klaim v3.0. Juga mengimplementasikan `logging::init()` dan `metrics::init()`/`render()` secara nyata (bukan sekadar stub) karena `main.rs` sudah memanggilnya. `cargo build`, `cargo test` (5/5), dan `cargo fmt -- --check` semuanya lulus untuk pertama kalinya |
+| 5.0 | 17 September 2026 | Implementasi P0 pertama: authentication middleware. Menambahkan `security::hash::{hash_secret,verify_secret}` (Argon2id, constant-time), `security::api_key::{parse_bearer_token,key_prefix,MerchantContext}`, dan `api::middleware::authentication::require_api_key` (validasi Bearer token, lookup + verifikasi hash, cek merchant aktif, attach `MerchantContext`). Dipasang hanya pada payment routes via `from_fn_with_state`, bukan global. `auth_layer()` placeholder dihapus dari `middleware/mod.rs`. 8 unit test baru (13/13 total lulus). Belum ditest end-to-end karena tidak ada Postgres/Docker di environment ini dan migration tidak seed `api_keys` |
