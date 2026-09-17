@@ -34,6 +34,11 @@ const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 /// Request bodies larger than this are rejected before hashing/buffering.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// The validated `Idempotency-Key` header value, attached to request
+/// extensions so handlers don't need to re-parse the header themselves.
+#[derive(Debug, Clone)]
+pub struct IdempotencyKey(pub String);
+
 /// Axum middleware: enforces `Idempotency-Key` on POST payment routes.
 ///
 /// Must run *after* [`crate::api::middleware::authentication::require_api_key`]
@@ -110,6 +115,10 @@ pub async fn require_idempotency_key(
         ));
     }
 
+    let mut parts = parts;
+    parts
+        .extensions
+        .insert(IdempotencyKey(idempotency_key.clone()));
     let req = Request::from_parts(parts, Body::from(body_bytes));
     let response = next.run(req).await;
 

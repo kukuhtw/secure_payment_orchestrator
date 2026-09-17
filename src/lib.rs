@@ -32,6 +32,7 @@ pub struct AppState {
     pub redis: redis::aio::ConnectionManager,
     pub providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>>,
     pub settings: config::settings::Settings,
+    pub payment_service: application::payment::PaymentService,
 }
 
 impl AppState {
@@ -41,12 +42,22 @@ impl AppState {
         providers: Vec<Box<dyn PaymentProvider>>,
         settings: config::settings::Settings,
     ) -> Self {
+        let repos = Repositories::new(db_pool.clone());
+        let providers = Arc::new(RwLock::new(providers));
+        let payment_service = application::payment::PaymentService::new(
+            repos.payment.clone(),
+            repos.attempt.clone(),
+            repos.audit_log.clone(),
+            providers.clone(),
+        );
+
         Self {
-            repos: Repositories::new(db_pool.clone()),
+            repos,
             db_pool,
             redis,
-            providers: Arc::new(RwLock::new(providers)),
+            providers,
             settings,
+            payment_service,
         }
     }
 }

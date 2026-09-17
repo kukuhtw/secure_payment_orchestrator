@@ -1,5 +1,7 @@
 //! Payment-related DTOs (request & response).
 
+use crate::domain::payment::Payment;
+use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -127,4 +129,87 @@ pub struct ReconcileData {
     pub provider_status: String,
     pub resolution: String,
     pub reconciled_at: String,
+}
+
+impl From<Payment> for PaymentData {
+    fn from(payment: Payment) -> Self {
+        Self {
+            payment_id: payment.id.to_string(),
+            merchant_reference: payment.merchant_reference,
+            status: payment.status.to_string(),
+            amount: payment.amount.amount,
+            currency: payment.amount.currency,
+            provider: payment.provider.unwrap_or_default(),
+            payment_url: payment.payment_url,
+            // Attempt/webhook-event enrichment on GET is a follow-up — the
+            // application service doesn't fetch those yet (see PaymentService).
+            attempts: None,
+            webhook_events: None,
+            created_at: payment
+                .created_at
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            updated_at: Some(
+                payment
+                    .updated_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            ),
+            completed_at: payment
+                .completed_at
+                .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        }
+    }
+}
+
+impl From<Payment> for PaymentResponse {
+    fn from(payment: Payment) -> Self {
+        Self {
+            data: payment.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::payment::Money;
+    use uuid::Uuid;
+
+    #[test]
+    fn maps_payment_domain_entity_to_response_dto() {
+        let money = Money::new(250_000, "IDR").unwrap();
+        let mut payment = Payment::new(
+            Uuid::new_v4(),
+            "checkout-order-10001".into(),
+            "ORDER-10001".into(),
+            money,
+            Some("Test payment".into()),
+        );
+        payment.provider = Some("MIDTRANS".into());
+        payment.payment_url = Some("https://pay.example/abc".into());
+
+        let response: PaymentResponse = payment.clone().into();
+
+        assert_eq!(response.data.payment_id, payment.id.to_string());
+        assert_eq!(response.data.merchant_reference, "ORDER-10001");
+        assert_eq!(response.data.status, "PENDING");
+        assert_eq!(response.data.amount, 250_000);
+        assert_eq!(response.data.currency, "IDR");
+        assert_eq!(response.data.provider, "MIDTRANS");
+        assert_eq!(
+            response.data.payment_url.as_deref(),
+            Some("https://pay.example/abc")
+        );
+        assert!(response.data.created_at.ends_with('Z'));
+        assert!(response.data.completed_at.is_none());
+    }
+
+    #[test]
+    fn falls_back_to_empty_provider_when_unset() {
+        let money = Money::new(1000, "IDR").unwrap();
+        let payment = Payment::new(Uuid::new_v4(), "key".into(), "REF".into(), money, None);
+
+        let response: PaymentResponse = payment.into();
+
+        assert_eq!(response.data.provider, "");
+    }
 }

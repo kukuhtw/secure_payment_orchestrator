@@ -4,72 +4,72 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi report | 7.0 |
+| Versi report | 8.0 |
 | Tanggal audit | 17 September 2026 |
 | Status produk | Proof of Concept, belum production-ready |
 | Dasar penilaian | `cargo build`, `cargo test`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
-| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (22/22 test lulus), `cargo fmt -- --check` lulus tanpa isu |
+| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (29/29 test lulus), `cargo fmt -- --check` lulus tanpa isu |
 
 ## 1. Ringkasan Eksekutif
 
 Fondasi proyek sudah tersedia: struktur aplikasi Rust, domain model, state machine,
 PostgreSQL repositories, Redis lock helper, kontrak provider, empat provider adapter
 (Midtrans/Alpha, Xendit/Beta, DOKU/Gamma, NICEPAY), konfigurasi, dokumentasi API,
-container setup, authentication middleware, idempotency middleware, dan — baru pada
-pass ini — **payment application service** serta **API key seed/tooling**.
+container setup, authentication middleware, idempotency middleware, payment application
+service, dan — baru pada pass ini — **`POST /payments` dan `GET /payments/{id}` yang
+benar-benar tersambung ke `PaymentService`**, bukan lagi `NOT_IMPLEMENTED`.
 
-Pass v7.0 mengerjakan dua item P0 sekaligus:
+Pass v8.0 menyambungkan HTTP handler ke `PaymentService` (§3.4):
 
-1. **Seed/tooling API key.** Migration 001 hanya seed `merchants`, tanpa `api_keys` —
-   artinya tidak ada cara resmi untuk membuat kredensial untuk testing atau onboarding
-   merchant baru. Ditambahkan `src/bin/gen_api_key.rs` (`cargo run --bin gen_api_key --
-   <plaintext>`) yang generate/hash API key pakai fungsi Argon2 yang sama dengan yang
-   dipakai authentication middleware, lalu print `key_prefix` + `key_hash` siap
-   di-`INSERT`. Tool ini dipakai untuk generate migration baru,
-   `migrations/20260917_002_seed_demo_api_keys.sql`, yang men-seed dua API key persis
-   sesuai contoh yang sudah dipakai di README.md (`sk_live_demo_key_001` untuk Demo
-   Merchant/standard, `sk_live_ops_key_001` untuk Operations/operations) — begitu
-   migration ini jalan di Postgres sungguhan, contoh curl di README benar-benar bisa
-   dipakai.
-2. **Payment application service.** `src/application/payment.rs::PaymentService` —
-   `create_payment` (validasi via `Money::new`, pilih provider, panggil
-   `provider.create_payment()`, simpan `Payment` + `PaymentAttempt` awal + `AuditLogRow`)
-   dan `get_payment` (fetch + convert `PaymentRow` → domain `Payment` via `TryFrom` baru
-   di `domain/payment.rs`). Service ini **decoupled dari `AppState`** — constructor-nya
-   cuma minta collaborator yang dia butuh (`PaymentRepository`, `AttemptRepository`,
-   `AuditLogRepository`, daftar provider), supaya bisa ditest pakai fake in-memory tanpa
-   Postgres/HTTP sungguhan. 6 unit test baru menutupi happy path, validasi gagal, provider
-   tidak tersedia, provider error, dan get-payment (found/not-found).
+- **`create_payment`** sekarang: ambil `MerchantContext` dari request extensions (di-set
+  authentication middleware) dan `IdempotencyKey` (di-set idempotency middleware — baru
+  ditambahkan sebagai extension pada pass ini, lihat catatan di bawah), bangun
+  `CreatePaymentInput`, panggil `PaymentService::create_payment`, map `Payment` →
+  `PaymentResponse` DTO via `impl From<Payment>` baru di `api/dto/payment.rs`, balas
+  `201 Created`.
+- **`get_payment`** sekarang: parse `payment_id` dari path jadi `Uuid` (400 kalau format
+  salah), panggil `PaymentService::get_payment`, balas `200 OK` dengan DTO yang sama, atau
+  `404 PAYMENT_NOT_FOUND` (kode dan struktur detail persis sesuai
+  `documentation/api/API-Contract-Secure-Payment-Orchestrator.md` §3.2) kalau tidak
+  ketemu.
+- Error dari `ApplicationError` dipetakan eksplisit ke kode error API: `Validation`→400,
+  `Conflict`→409, `Provider`→502 `PROVIDER_ERROR`, `NoProviderAvailable`→503
+  `PROVIDER_UNAVAILABLE`; error domain lain yang tak terduga jatuh ke 500 (dicatat via
+  `tracing::error!`, tidak membocorkan detail internal ke client).
+- `AppState` sekarang membangun dan menyimpan satu instance `PaymentService` (dibuat di
+  `AppState::new`, konsisten dengan `Repositories`/`providers` yang sudah ada di sana).
+- Idempotency middleware (`api/middleware/idempotency.rs`) sedikit diperluas: setelah
+  memvalidasi header, ia sekarang attach `IdempotencyKey` (newtype `String`) ke request
+  extensions supaya handler tidak perlu parse ulang header yang sama — hanya berubah pada
+  jalur sukses (forward ke handler), tidak mengubah perilaku cached-response/conflict.
 
-**Batas scope yang disengaja (2×):**
-- Provider selection di `create_payment` masih naif ("provider pertama yang
-  `is_available()`") — placeholder untuk item P0 terpisah "Provider selection by
-  availability/priority" yang belum menyertakan circuit breaker/prioritas.
-- Tiga langkah persist (`payment.create` → `attempt.save` → `audit_log.log`) **belum**
-  dibungkus satu transaksi database — persis item P0 "Atomic transaction" yang masih
-  terbuka; kalau proses crash di antara langkah, payment bisa tersimpan tanpa
-  attempt/audit-nya.
-- `PaymentService` **belum dipasang ke HTTP handler** (`src/api/routes/payment.rs`
-  masih mengembalikan `NOT_IMPLEMENTED` untuk semuanya) — mengonsumsi service ini dari
-  route adalah item P0 terpisah ("Create, get, search, dan cancel payment handlers")
-  yang tidak diminta pada pass ini.
+**Search, cancel, retry, dan reconcile TIDAK disentuh** pada pass ini — `PaymentService`
+belum punya method untuk itu (lihat §3.4, §5), jadi keempat handler itu tetap
+`NOT_IMPLEMENTED` seperti sebelumnya.
+
+7 unit test baru: 2 untuk `PaymentData`/`PaymentResponse` conversion (mapping field,
+format timestamp ISO 8601 dengan akhiran `Z`, fallback provider kosong), 5 untuk fungsi
+pemetaan error (`map_application_error`, `map_get_payment_error`) — semuanya pure
+function, tidak butuh DB.
 
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 24 | 40% |
-| Parsial | 17 | 28% |
+| Selesai | 26 | 43% |
+| Parsial | 15 | 25% |
 | Belum | 19 | 32% |
 | **Total** | **60** | **100%** |
 
-Dibanding v6.0 (24 selesai / 14 parsial / 22 belum), tiga task naik dari Belum ke
-Parsial: Create payment dan Get payment (application service-nya sudah lengkap+tertest,
-tapi HTTP handler belum memanggilnya), dan Provider selection by availability/priority
-(sekarang ada seleksi naif, bukan lagi nihil). Tidak ada task yang turun status.
+Dibanding v7.0 (24 selesai / 17 parsial / 19 belum), dua task naik dari Parsial ke
+Selesai: Create payment dan Get payment — sekarang benar-benar bisa dipanggil lewat HTTP,
+bukan cuma service layer yang siap tapi belum tersambung. Tidak ada task yang turun
+status.
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
-kesiapan production. Core payment flow **masih** belum bisa dipakai lewat HTTP — handler
-API masih mengembalikan `NOT_IMPLEMENTED` — tapi business logic di baliknya (auth,
-idempotency, payment service) sekarang sudah ada dan tertest, tinggal disambungkan.
+kesiapan production. **Belum ditest terhadap Postgres/Redis sungguhan** (tidak ada Docker
+di environment ini) — jadi walau alur create/get secara kode sudah lengkap dan lulus unit
+test, belum ada bukti request HTTP sungguhan berhasil membuat/mengambil payment dari
+database nyata. Search, cancel, retry, dan reconcile masih `NOT_IMPLEMENTED`, dan atomic
+transaction (§3.3) masih jadi gap terbuka untuk `create_payment`.
 
 ## 2. Definisi Status
 
@@ -115,15 +115,15 @@ idempotency, payment service) sekarang sudah ada dan tertest, tinggal disambungk
 | Atomic business transaction | Parsial | Tidak ditemukan pemakaian `sqlx::Transaction`/`.begin()` di source manapun. Sekarang lebih konkret terlihat di `PaymentService::create_payment` (§3.4): `payment_repo.create` → `attempt_repo.save` → `audit_repo.log` adalah 3 panggilan terpisah tanpa pembungkus transaksi (didokumentasikan eksplisit sebagai NOTE di kode) |
 | Concurrency protection | Parsial | Redis lock helper (§3.6) kini dipakai nyata oleh idempotency middleware (§3.4) untuk mencegah request konkuren dengan `Idempotency-Key` sama diproses bersamaan; belum dipakai oleh webhook/reconciliation flow — `application/*.rs` masih skeleton satu baris |
 
-### 3.4 Core Payment API — 2 selesai, 3 parsial, 3 belum
+### 3.4 Core Payment API — 4 selesai, 1 parsial, 3 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
-| Request/response DTO | Parsial | Struct lengkap di `src/api/dto/payment.rs`; validation belum diterapkan pada handler |
+| Request/response DTO | Parsial | Struct lengkap; `impl From<Payment> for PaymentResponse` baru (§8 v8.0) dipakai handler sungguhan. Validasi field di luar yang sudah dicek `Money::new` (mis. `merchant_reference` non-kosong, format currency di luar panjang 3) masih belum diterapkan |
 | Authentication middleware | Selesai | `src/api/middleware/authentication.rs::require_api_key` — validasi `Authorization: Bearer`, lookup `key_prefix`, verifikasi Argon2 constant-time (`security::hash::verify_secret`), cek merchant `ACTIVE`, attach `MerchantContext` ke request extensions. Dipasang hanya pada payment routes via `axum::middleware::from_fn_with_state` di `api/mod.rs` (bukan global — health/ready/metrics/webhook tidak terpengaruh). **Belum ditest end-to-end** (tidak ada Postgres/Docker di environment ini); hanya unit test pure-logic yang lulus (lihat §3.7, §3.9) |
-| Idempotency middleware | Selesai | `src/api/middleware/idempotency.rs::require_idempotency_key` — wajibkan header pada POST, hash body (SHA-256), cek duplikat/conflict ke `IdempotencyRepository` (replay cached response atau `409 IDEMPOTENCY_MISMATCH`), acquire Redis lock untuk cegah request konkuren (`409 IDEMPOTENCY_IN_PROGRESS`). Dipasang setelah auth middleware (butuh `MerchantContext`). Sisi tulis (`save` ke `idempotency_keys`) sengaja belum ada — menunggu atomic transaction bersama payment insert (lihat §5 P0). **Belum ditest end-to-end** (alasan sama seperti authentication middleware) |
-| Create payment | Parsial (naik dari Belum) | `src/application/payment.rs::PaymentService::create_payment` lengkap+tertest (validasi, pilih provider, simpan payment+attempt+audit) — lihat §3.3, §3.5, §3.9. **HTTP handler belum memanggilnya**, `src/api/routes/payment.rs` masih mengembalikan `NOT_IMPLEMENTED` |
-| Get payment | Parsial (naik dari Belum) | `PaymentService::get_payment` lengkap+tertest (fetch + convert `PaymentRow` → `Payment` via `TryFrom` baru di `domain/payment.rs`). **HTTP handler belum memanggilnya** |
+| Idempotency middleware | Selesai | `src/api/middleware/idempotency.rs::require_idempotency_key` — wajibkan header pada POST, hash body (SHA-256), cek duplikat/conflict ke `IdempotencyRepository` (replay cached response atau `409 IDEMPOTENCY_MISMATCH`), acquire Redis lock untuk cegah request konkuren (`409 IDEMPOTENCY_IN_PROGRESS`). Dipasang setelah auth middleware (butuh `MerchantContext`). Sejak v8.0 juga attach `IdempotencyKey` ke request extensions supaya `create_payment` tidak perlu parse ulang header. Sisi tulis (`save` ke `idempotency_keys`) sengaja belum ada — menunggu atomic transaction bersama payment insert (lihat §5 P0). **Belum ditest end-to-end** (alasan sama seperti authentication middleware) |
+| Create payment | Selesai (naik dari Parsial) | `src/api/routes/payment.rs::create_payment` sekarang memanggil `PaymentService::create_payment` dan mengembalikan `201 Created` dengan `PaymentResponse` sungguhan, bukan `NOT_IMPLEMENTED`. Error dipetakan ke kode API yang sesuai (`map_application_error`). **Belum ditest terhadap Postgres/Redis sungguhan** (tidak ada Docker di environment ini) |
+| Get payment | Selesai (naik dari Parsial) | `get_payment` memanggil `PaymentService::get_payment`, balas `200 OK` atau `404 PAYMENT_NOT_FOUND` (kode+detail sesuai API contract §3.2). **Belum ditest terhadap Postgres sungguhan** |
 | Search payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED`; tidak ada method service untuk ini |
 | Cancel payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED`; tidak ada method service untuk ini (butuh `PaymentProvider::cancel_payment`, belum ada di trait) |
 | Manual retry endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
@@ -181,7 +181,7 @@ idempotency, payment service) sekarang sudah ada dan tertest, tinggal disambungk
 | OpenAPI specification | Selesai | `documentation/api/openapi.yaml` |
 | Domain unit tests | Belum | Tidak ditemukan `#[cfg(test)]`/`#[test]` langsung di `src/domain/*.rs`. `Payment::try_from(PaymentRow)` baru (§3.3) tercakup **tidak langsung** lewat test `application::payment` (§di bawah), tapi domain layer sendiri belum punya test filenya |
 | API integration tests | Belum | `tests/api/mod.rs` masih TODO |
-| Provider tests | Parsial | 5 unit test di provider layer (Midtrans/Xendit/DOKU/NICEPAY status mapping) — semuanya **lulus** via `cargo test`; `tests/providers/mod.rs` (integration) masih TODO. Di luar provider, ada 17 unit test lain (8 security, 3 idempotency middleware, 6 `application::payment`) — total 22/22 lulus |
+| Provider tests | Parsial | 5 unit test di provider layer (Midtrans/Xendit/DOKU/NICEPAY status mapping) — semuanya **lulus** via `cargo test`; `tests/providers/mod.rs` (integration) masih TODO. Di luar provider, ada 24 unit test lain (8 security, 3 idempotency middleware, 6 `application::payment`, 2 DTO mapping, 5 error mapping handler) — total 29/29 lulus |
 | CI/CD workflow | Belum | Folder `.github/` tidak ditemukan di repository |
 | Postman collection | Belum | File tidak tersedia |
 | Demo/end-to-end script | Belum | File tidak tersedia |
@@ -201,11 +201,12 @@ idempotency, payment service) sekarang sudah ada dan tertest, tinggal disambungk
 11. PostgreSQL pool creation dan Redis client setup (path/naming bug diperbaiki).
 12. Redis distributed lock helper (compile bug diperbaiki).
 13. Structured JSON logging initialization.
-14. `spo-api` compile bersih: `cargo build`, `cargo test` (22/22 lulus), dan `cargo fmt -- --check` semuanya lulus.
+14. `spo-api` compile bersih: `cargo build`, `cargo test` (29/29 lulus), dan `cargo fmt -- --check` semuanya lulus.
 15. Authentication middleware — Argon2 API-key verification, merchant context, dipasang hanya pada payment routes (belum ditest end-to-end, lihat §3.4 dan §7).
 16. Idempotency middleware (sisi baca) — duplicate/conflict detection dan Redis lock concurrency guard.
 17. `src/bin/gen_api_key.rs` — tool generate/hash API key, dipakai untuk membuat 2 seed key di migration `20260917_002_seed_demo_api_keys.sql` (cocok contoh `sk_live_demo_key_001`/`sk_live_ops_key_001` di README.md).
-18. `application::payment::PaymentService` (`create_payment`, `get_payment`) — lengkap dan tertest dengan fake repository/provider, belum disambungkan ke HTTP handler.
+18. `application::payment::PaymentService` (`create_payment`, `get_payment`) — lengkap dan tertest dengan fake repository/provider.
+19. `POST /payments` dan `GET /payments/{id}` benar-benar tersambung ke `PaymentService` — bukan lagi `NOT_IMPLEMENTED` (lihat §3.4). Belum ditest terhadap Postgres/Redis sungguhan.
 
 ## 5. Daftar yang Belum Selesai
 
@@ -220,12 +221,13 @@ tidak bisa dikompilasi.
 2. ~~API-key hashing/verification.~~ **Selesai pada v5.0.**
 3. ~~Idempotency flow dengan Redis lock dan DB constraint.~~ **Sisi baca selesai pada v6.0** (duplicate/conflict detection, concurrency lock) — lihat §3.4. Sisi tulis (persist `IdempotencyRow`) masih menunggu item #7 di bawah.
 4. ~~Seed/tooling untuk membuat API key.~~ **Selesai pada v7.0** — `src/bin/gen_api_key.rs` + migration `20260917_002_seed_demo_api_keys.sql`. Belum dijalankan terhadap Postgres sungguhan (tidak ada Docker di environment ini).
-5. Request validation.
-6. ~~Payment application service.~~ **Selesai sebagian pada v7.0** — `PaymentService::create_payment`/`get_payment` lengkap+tertest (lihat §3.4, §3.9), tapi belum dipanggil dari HTTP handler (item #8), dan `search`/`cancel`/`retry` belum punya method service.
+5. Request validation (validasi field di luar yang sudah dicek `Money::new` — mis. `merchant_reference` non-kosong, batas panjang `description`).
+6. ~~Payment application service.~~ **Selesai pada v7.0** — `PaymentService::create_payment`/`get_payment` lengkap+tertest (lihat §3.4, §3.9); `search`/`cancel`/`retry` masih belum punya method service (lihat item #9-10).
 7. Provider selection dan invocation. **Seleksi naif ("first available") sudah ada** di dalam `PaymentService::create_payment` sejak v7.0 (lihat §3.5) — seleksi berbasis prioritas/circuit breaker sungguhan masih belum.
-8. Create, get, search, dan cancel payment handlers — sambungkan `src/api/routes/payment.rs` ke `PaymentService` (perlu mengonsumsi `MerchantContext` dari request extensions untuk scoping per-merchant, dan `Idempotency-Key` dari header untuk `CreatePaymentInput`).
-9. Atomic transaction untuk payment, idempotency record, attempt, dan audit log — `PaymentService::create_payment` saat ini melakukan 3 panggilan repo terpisah tanpa transaksi (lihat §3.3). Begitu ini selesai, idempotency middleware perlu ditambah langkah `save()` setelah `next.run()` sukses.
-10. `PaymentProvider` trait belum punya method `cancel_payment` — diperlukan sebelum handler Cancel Payment bisa dikerjakan.
+8. ~~Create dan Get payment handlers.~~ **Selesai pada v8.0** — `src/api/routes/payment.rs::create_payment`/`get_payment` tersambung ke `PaymentService` (lihat §3.4). Belum ditest terhadap Postgres/Redis sungguhan.
+9. Search dan Cancel payment handlers — `PaymentService` belum punya method untuk ini; Cancel juga butuh `PaymentProvider::cancel_payment` yang belum ada di trait.
+10. Manual retry endpoint — belum ada method service, belum ada retry orchestration (lihat P1).
+11. Atomic transaction untuk payment, idempotency record, attempt, dan audit log — `PaymentService::create_payment` saat ini melakukan 3 panggilan repo terpisah tanpa transaksi (lihat §3.3). Begitu ini selesai, idempotency middleware perlu ditambah langkah `save()` setelah `next.run()` sukses.
 
 ### Prioritas P1 — reliability dan fallback
 
@@ -273,12 +275,12 @@ Milestone berikutnya dapat dianggap selesai jika:
 
 | Risiko / blocker | Dampak | Tindakan |
 | --- | --- | --- |
-| Core API handlers masih `NOT_IMPLEMENTED` | Aplikasi belum dapat memproses payment lewat HTTP meskipun source compile, kedua middleware siap, dan `PaymentService` sudah ada+tertest | Sambungkan `PaymentService` ke `src/api/routes/payment.rs` (P0 §5 item 8) |
-| Authentication & idempotency middleware, migration seed, dan `PaymentService` belum ditest terhadap database sungguhan | Bug logic (mis. salah tangani expired/revoked key, race condition pada lock, atau migration SQL yang tidak sesuai skema) berpotensi belum terdeteksi meski unit test pure-logic/fake-repo lulus | Jalankan `sqlx migrate run` + integration test begitu Postgres/Redis tersedia |
-| Idempotency middleware belum bisa menyimpan response (sisi tulis) | Setelah handler create-payment tersambung, duplicate request kedua **tidak akan** di-replay dari cache sampai langkah `save()` ditambahkan bersama atomic transaction | Sambungkan `IdempotencyRepository::save()` saat mengerjakan item P0 "Atomic transaction" |
-| `PaymentService::create_payment` tidak atomic | Kalau proses crash setelah `payment_repo.create` tapi sebelum `attempt_repo.save`/`audit_repo.log`, payment tersimpan tanpa attempt/audit-nya | Bungkus 3 panggilan itu dalam satu `sqlx::Transaction` (P0 §5 item 9) |
+| Search/cancel/retry/reconcile handlers masih `NOT_IMPLEMENTED` | Merchant tidak bisa cari, batalkan, atau retry payment lewat HTTP — hanya create+get yang jalan | Selesaikan P0 §5 item 9-10 (butuh method service baru + extend `PaymentProvider` trait untuk cancel) |
+| Create/Get payment, authentication & idempotency middleware, migration seed belum ditest terhadap database sungguhan | Bug logic (mis. salah tangani expired/revoked key, race condition pada lock, migration SQL yang tidak sesuai skema, atau DTO mapping yang tidak cocok skema DB) berpotensi belum terdeteksi meski unit test pure-logic/fake-repo lulus | Jalankan `sqlx migrate run` + hit endpoint sungguhan begitu Postgres/Redis tersedia |
+| Idempotency middleware belum bisa menyimpan response (sisi tulis) | Sekarang `create_payment` sungguhan berjalan, tapi duplicate request kedua **tidak akan** di-replay dari cache sampai langkah `save()` ditambahkan bersama atomic transaction | Sambungkan `IdempotencyRepository::save()` saat mengerjakan item P0 "Atomic transaction" |
+| `PaymentService::create_payment` tidak atomic | Kalau proses crash setelah `payment_repo.create` tapi sebelum `attempt_repo.save`/`audit_repo.log`, payment tersimpan tanpa attempt/audit-nya — sekarang risiko ini nyata karena endpoint-nya benar-benar bisa dipanggil | Bungkus 3 panggilan itu dalam satu `sqlx::Transaction` (P0 §5 item 11) |
 | README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
-| Automated test masih terbatas (22 unit test: 5 provider + 8 security + 3 idempotency + 6 payment service) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
+| Automated test masih terbatas (29 unit test: 5 provider + 8 security + 3 idempotency + 6 payment service + 7 DTO/error-mapping) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
 | `cargo clippy` belum pernah dijalankan | Lint issue/anti-pattern berpotensi belum terdeteksi | Jalankan `cargo clippy` sebelum CI dibuat |
 | Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
 | Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
@@ -288,14 +290,14 @@ Milestone berikutnya dapat dianggap selesai jika:
 | Pemeriksaan | Hasil |
 | --- | --- |
 | `cargo build` (lib + bin + `gen_api_key`) | **Lulus** — 0 error, hanya warning kosmetik (`unused variable`, `dead_code` pada fungsi yang memang belum dipakai) |
-| `cargo test` | **Lulus** — 22/22 test passed (5 provider status-mapping + 8 security + 3 idempotency middleware + 6 `application::payment` dengan fake repository/provider); 0 failed |
+| `cargo test` | **Lulus** — 29/29 test passed (5 provider status-mapping + 8 security + 3 idempotency middleware + 6 `application::payment` + 2 DTO mapping + 5 error mapping handler); 0 failed |
 | `cargo fmt -- --check` | **Lulus**, tidak ada isu format |
 | `cargo clippy` | Belum dijalankan pada pass ini — masuk backlog P3 |
 | `gen_api_key` tool | Dijalankan manual 2× untuk generate hash yang di-embed di migration seed; output diverifikasi cocok format `key_prefix`/Argon2 PHC yang diharapkan repository |
-| Authentication, idempotency middleware, migration seed, `PaymentService` end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini. `PaymentService` sendiri tertest lewat fake repository/provider (bukan DB sungguhan), sisanya hanya pure-logic unit test |
-| Source scan untuk TODO/stub | Ditemukan pada payment routes, webhook route, application services (audit/provider/reconciliation/webhook), dan test file (`tests/api`, `tests/providers`) |
-| Payment API runtime implementation | Application service tersedia (§3.4); HTTP handler belum memanggilnya |
-| Automated test implementation | 22 test: provider (5) + security (8) + idempotency middleware (3) + payment application service (6); domain/API/webhook/concurrency/integration test belum ada |
+| Authentication middleware, idempotency middleware, migration seed, `create_payment`/`get_payment` end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini. `PaymentService` dan DTO/error-mapping tertest lewat fake repository/provider dan pure function (bukan DB/HTTP sungguhan) |
+| Source scan untuk TODO/stub | Ditemukan pada search/cancel/retry/reconcile payment routes, webhook route, application services (audit/provider/reconciliation/webhook), dan test file (`tests/api`, `tests/providers`) |
+| Payment API runtime implementation | `POST /payments` dan `GET /payments/{id}` tersambung ke `PaymentService` (§3.4); search/cancel/retry/reconcile masih `NOT_IMPLEMENTED` |
+| Automated test implementation | 29 test: provider (5) + security (8) + idempotency middleware (3) + payment application service (6) + DTO/error-mapping handler (7); domain/API integration/webhook/concurrency test belum ada |
 | Production readiness | Tidak siap |
 
 ## 9. Changelog
@@ -310,3 +312,4 @@ Milestone berikutnya dapat dianggap selesai jika:
 | 5.0 | 17 September 2026 | Implementasi P0 pertama: authentication middleware. Menambahkan `security::hash::{hash_secret,verify_secret}` (Argon2id, constant-time), `security::api_key::{parse_bearer_token,key_prefix,MerchantContext}`, dan `api::middleware::authentication::require_api_key` (validasi Bearer token, lookup + verifikasi hash, cek merchant aktif, attach `MerchantContext`). Dipasang hanya pada payment routes via `from_fn_with_state`, bukan global. `auth_layer()` placeholder dihapus dari `middleware/mod.rs`. 8 unit test baru (13/13 total lulus). Belum ditest end-to-end karena tidak ada Postgres/Docker di environment ini dan migration tidak seed `api_keys` |
 | 6.0 | 17 September 2026 | Implementasi P0 kedua: idempotency middleware (sisi baca). Menambahkan `api::middleware::idempotency::require_idempotency_key` — wajibkan `Idempotency-Key` pada POST, hash body (SHA-256), replay cached response untuk duplikat identik, `409 IDEMPOTENCY_MISMATCH` untuk payload berbeda, `409 IDEMPOTENCY_IN_PROGRESS` via Redis lock (`infrastructure::redis::lock`, sekarang benar-benar dipakai) untuk request konkuren. Dipasang di `api/mod.rs` setelah auth middleware (urutan layer penting: layer yang ditambahkan terakhir jadi terluar dan jalan duluan). `idempotency_layer()` placeholder dihapus dari `middleware/mod.rs`. Sisi tulis (`IdempotencyRepository::save`) sengaja belum diimplementasikan — butuh `payment_id` yang baru ada setelah atomic transaction (P0 lain) selesai. 3 unit test baru (16/16 total lulus). Belum ditest end-to-end karena tidak ada Postgres/Docker di environment ini |
 | 7.0 | 17 September 2026 | Dua item P0: (1) Seed/tooling API key — `src/bin/gen_api_key.rs` (CLI generate+hash key pakai fungsi Argon2 yang sama dengan auth middleware) dan migration `20260917_002_seed_demo_api_keys.sql` yang men-seed `sk_live_demo_key_001`/`sk_live_ops_key_001` (cocok contoh di README.md) ke dua merchant yang sudah ada. (2) `application::payment::PaymentService` — `create_payment` (validasi, pilih provider naif "first available", panggil provider, simpan payment+attempt+audit) dan `get_payment` (fetch + `Payment::try_from(PaymentRow)` baru di `domain/payment.rs`), didesain decoupled dari `AppState` supaya testable dengan fake repository/provider. Belum disambungkan ke `src/api/routes/payment.rs` (item P0 terpisah), dan 3 langkah persist belum dibungkus transaksi (item P0 terpisah lain). 6 unit test baru (22/22 total lulus) |
+| 8.0 | 17 September 2026 | Sambungkan `src/api/routes/payment.rs::create_payment`/`get_payment` ke `PaymentService`: extract `MerchantContext` (auth) + `IdempotencyKey` (idempotency middleware, baru attach extension ini) dari request extensions, panggil service, map `Payment`→`PaymentResponse` via `impl From<Payment>` baru di `api/dto/payment.rs`, balas `201`/`200`/`404 PAYMENT_NOT_FOUND` (kode sesuai API contract). `ApplicationError` dipetakan ke kode error API (`map_application_error`/`map_get_payment_error`) — `Validation`→400, `Conflict`→409, `Provider`→502, `NoProviderAvailable`→503. `AppState` sekarang membangun `PaymentService` sekali di `AppState::new`. Search/cancel/retry/reconcile TIDAK disentuh (`PaymentService` belum punya method untuk itu). 7 unit test baru — 2 DTO mapping, 5 error mapping (29/29 total lulus). Belum ditest terhadap Postgres/Redis sungguhan |
