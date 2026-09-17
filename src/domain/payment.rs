@@ -4,6 +4,7 @@
 //! Domain layer PURE — tidak ada dependensi ke axum, sqlx, atau redis.
 
 use crate::domain::error::DomainError;
+use crate::domain::repositories::PaymentRow;
 use crate::domain::status::PaymentStatus;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -86,5 +87,33 @@ impl Payment {
 
     pub fn is_owner(&self, merchant_id: Uuid) -> bool {
         self.merchant_id == merchant_id
+    }
+}
+
+impl TryFrom<PaymentRow> for Payment {
+    type Error = DomainError;
+
+    fn try_from(row: PaymentRow) -> Result<Self, Self::Error> {
+        let status =
+            PaymentStatus::try_from(row.status.as_str()).map_err(DomainError::InvalidStatus)?;
+
+        Ok(Self {
+            id: row.id,
+            merchant_id: row.merchant_id,
+            idempotency_key: row.idempotency_key,
+            merchant_reference: row.merchant_reference,
+            amount: Money {
+                amount: row.amount,
+                currency: row.currency,
+            },
+            description: row.description,
+            status,
+            provider: row.provider,
+            payment_url: row.payment_url,
+            failure_reason: row.failure_reason,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            completed_at: row.completed_at,
+        })
     }
 }
