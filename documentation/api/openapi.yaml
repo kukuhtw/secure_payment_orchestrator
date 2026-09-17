@@ -8,8 +8,8 @@ info:
     transaksi ganda, retry yang aman, failover terbatas, webhook
     terverifikasi, rekonsiliasi, dan audit trail.
 
-    Proof of Concept menggunakan Midtrans Sandbox serta provider simulasi
-    dan tidak memproses uang sungguhan. Tujuan utamanya adalah membuktikan rancangan layanan
+    Proof of Concept menggunakan Midtrans Sandbox, Xendit test mode, DOKU Sandbox,
+    dan contoh NICEPAY Sandbox serta tidak memproses uang sungguhan. Tujuan utamanya adalah membuktikan rancangan layanan
     pembayaran yang benar, dapat diuji, aman, mudah diaudit, dan tahan
     terhadap kegagalan jaringan maupun provider.
   version: "1.0.0"
@@ -610,7 +610,8 @@ PaymentSummary:
       enum:
         - MIDTRANS
         - XENDIT
-        - GAMMA
+        - DOKU
+        - NICEPAY
 
     ErrorResponse:
       type: object

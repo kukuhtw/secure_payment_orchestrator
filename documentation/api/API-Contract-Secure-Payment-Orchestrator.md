@@ -22,8 +22,8 @@ http://localhost:8080/api/v1
 ```
 
 Untuk environment POC, semua endpoint menggunakan base URL di atas. Provider Alpha telah
-dipetakan ke Midtrans Sandbox, Beta dipetakan ke Xendit test mode, dan Gamma tetap berupa
-simulator lokal.
+dipetakan ke Midtrans Sandbox, Beta dipetakan ke Xendit test mode, Gamma dipetakan ke
+DOKU Sandbox, dan NICEPAY tersedia sebagai contoh provider keempat.
 
 ### 1.2 Authentication
 
@@ -177,7 +177,7 @@ POST /api/v1/payments
 | `status` | `string` | Status awal: `PENDING` |
 | `amount` | `integer` | Jumlah dalam satuan terkecil |
 | `currency` | `string` | Kode ISO 4217 |
-| `provider` | `string` | Provider terpilih (`MIDTRANS`, `XENDIT`, `GAMMA`) |
+| `provider` | `string` | Provider terpilih (`MIDTRANS`, `XENDIT`, `DOKU`, `NICEPAY`) |
 | `payment_url` | `string` | URL redirect ke provider |
 | `created_at` | `string (ISO 8601)` | Waktu pembuatan |
 

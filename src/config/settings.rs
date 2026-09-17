@@ -20,6 +20,11 @@ pub struct Settings {
     pub doku_secret_key: String,
     pub doku_base_url: String,
     pub doku_timeout_seconds: u64,
+    pub nicepay_imid: String,
+    pub nicepay_merchant_key: String,
+    pub nicepay_base_url: String,
+    pub nicepay_pay_method: String,
+    pub nicepay_timeout_seconds: u64,
     pub max_retry_attempts: i32,
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_timeout_seconds: u64,
@@ -60,6 +65,15 @@ impl Settings {
             doku_base_url: std::env::var("DOKU_BASE_URL")
                 .unwrap_or_else(|_| "https://api-sandbox.doku.com".into()),
             doku_timeout_seconds: std::env::var("DOKU_TIMEOUT_SECONDS")
+                .unwrap_or_else(|_| "10".into())
+                .parse()?,
+            nicepay_imid: std::env::var("NICEPAY_IMID").unwrap_or_default(),
+            nicepay_merchant_key: std::env::var("NICEPAY_MERCHANT_KEY").unwrap_or_default(),
+            nicepay_base_url: std::env::var("NICEPAY_BASE_URL")
+                .unwrap_or_else(|_| "https://dev.nicepay.co.id".into()),
+            nicepay_pay_method: std::env::var("NICEPAY_PAY_METHOD")
+                .unwrap_or_else(|_| "01".into()),
+            nicepay_timeout_seconds: std::env::var("NICEPAY_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
                 .parse()?,
             max_retry_attempts: std::env::var("MAX_RETRY_ATTEMPTS")

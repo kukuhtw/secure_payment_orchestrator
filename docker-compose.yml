@@ -14,6 +14,11 @@ services:
       DOKU_SECRET_KEY: ${DOKU_SECRET_KEY:-}
       DOKU_BASE_URL: https://api-sandbox.doku.com
       DOKU_TIMEOUT_SECONDS: 10
+      NICEPAY_IMID: ${NICEPAY_IMID:-}
+      NICEPAY_MERCHANT_KEY: ${NICEPAY_MERCHANT_KEY:-}
+      NICEPAY_BASE_URL: https://dev.nicepay.co.id
+      NICEPAY_PAY_METHOD: "01"
+      NICEPAY_TIMEOUT_SECONDS: 10
       MIDTRANS_SERVER_KEY: ${MIDTRANS_SERVER_KEY:-}
       MIDTRANS_SNAP_BASE_URL: https://app.sandbox.midtrans.com
       MIDTRANS_CORE_BASE_URL: https://api.sandbox.midtrans.com

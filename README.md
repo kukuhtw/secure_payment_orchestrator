@@ -70,8 +70,9 @@ Ketika provider timeout setelah request terkirim:
 
 Secure Payment Orchestrator adalah layanan backend berbasis **Rust** yang menyediakan satu antarmuka pembayaran terpadu untuk menghubungkan merchant dengan beberapa payment provider. Sistem ini menangani pemilihan provider, pencegahan transaksi ganda (idempotency), retry aman, failover terbatas, webhook terverifikasi (HMAC), rekonsiliasi, dan audit trail lengkap.
 
-> **⚠️ Peringatan:** Ini adalah Proof of Concept (POC). Midtrans hanya dikonfigurasi ke
-> Sandbox, sedangkan provider lain masih berupa simulator. Jangan gunakan di production.
+> **⚠️ Peringatan:** Ini adalah Proof of Concept (POC). Midtrans, DOKU, dan NICEPAY
+> menggunakan Sandbox, sedangkan Xendit menggunakan test-mode credential. Jangan gunakan
+> di production.
 
 ---
 
@@ -107,8 +108,8 @@ Fungsi SPO:
 ### 🧪 Lalu Apa Itu "Provider Simulator"?
 
 Provider simulator adalah **versi tiruan** dari payment gateway yang berjalan **lokal di komputer**.
-Pada POC ini Alpha telah diganti dengan adapter Midtrans Sandbox, Beta dengan adapter
-Xendit test mode, dan hanya Gamma yang tetap berupa simulator lokal.
+Pada POC ini Alpha dipetakan ke Midtrans Sandbox, Beta ke Xendit test mode, dan Gamma ke
+DOKU Sandbox.
 
 | Aspek | Provider Simulator | Payment Gateway Sungguhan |
 | --- | --- | --- |
@@ -116,7 +117,7 @@ Xendit test mode, dan hanya Gamma yang tetap berupa simulator lokal.
 | **Response** | Dikontrol (success/rejection/timeout) | Tergantung pembayaran customer |
 | **Webhook** | Dikirim lokal | Dikirim dari server cloud |
 | **Uang** | ❌ Tidak ada uang sungguhan | ✅ Memproses transaksi riil |
-| **Koneksi** | Gamma berjalan lokal | Midtrans Sandbox dan Xendit test mode melalui internet |
+| **Koneksi** | Tidak digunakan oleh adapter riil | Midtrans, Xendit, DOKU, dan NICEPAY melalui internet |
 
 **Tujuan simulator:**
 1. **Membuktikan arsitektur** — bahwa pola adapter, retry, circuit breaker, dan webhook verification bekerja
@@ -199,6 +200,8 @@ mendukung currency, metode pembayaran, dan fitur yang dibutuhkan oleh transaksi 
 - [Arsitektur](#arsitektur)
 - [Integrasi Midtrans (Provider Alpha)](#integrasi-midtrans-provider-alpha)
 - [Integrasi Xendit (Provider Beta)](#integrasi-xendit-provider-beta)
+- [Integrasi DOKU (Provider Gamma)](#integrasi-doku-provider-gamma)
+- [Contoh Integrasi NICEPAY](#contoh-integrasi-nicepay)
 - [Struktur Proyek](#struktur-proyek)
 - [Prasyarat](#prasyarat)
 - [Instalasi & Menjalankan](#instalasi--menjalankan)
@@ -240,7 +243,8 @@ mendukung currency, metode pembayaran, dan fitur yang dibutuhkan oleh transaksi 
 
 ### Provider Adapter
 - ✅ Pattern trait-based untuk isolasi provider
-- ✅ Adapter Midtrans Sandbox dan Xendit test mode serta simulator Gamma
+- ✅ Adapter Midtrans Sandbox, Xendit test mode, dan DOKU Sandbox
+- 🔶 Contoh adapter NICEPAY Sandbox untuk registration/create payment
 - 🔶 Error mapping provider tersedia; orchestration classification belum terhubung
 ---
 
@@ -314,6 +318,77 @@ XENDIT_TIMEOUT_SECONDS=10
 > Secret API Key tidak boleh dikirim ke frontend atau disimpan di repository. Callback
 > Xendit nantinya harus diverifikasi menggunakan `X-CALLBACK-TOKEN`; webhook processing
 > SPO masih belum diimplementasikan end-to-end.
+
+---
+
+## Integrasi DOKU (Provider Gamma)
+
+Provider yang sebelumnya bernama Gamma sekarang mengidentifikasi diri sebagai `DOKU`.
+Implementasinya menggunakan Checkout API dari
+[DOKU Developer Documentation](https://developers.doku.com/):
+
+- Create payment menggunakan `POST /checkout/v1/payment`.
+- Status lookup/reconciliation menggunakan `GET /orders/v1/status/{invoice_number}`.
+- `merchant_reference` SPO dipakai sebagai DOKU `invoice_number`.
+- `payment.payment_url` dari DOKU menjadi `payment_url` SPO.
+- Adapter saat ini dibatasi ke mata uang `IDR`.
+
+Setiap request DOKU ditandatangani menggunakan `Client-Id`, `Request-Id`,
+`Request-Timestamp`, `Request-Target`, SHA-256 `Digest` untuk request berbodi, dan signature
+HMAC-SHA256 berbasis Secret Key.
+
+```env
+DOKU_CLIENT_ID=your-sandbox-client-id
+DOKU_SECRET_KEY=your-sandbox-secret-key
+DOKU_BASE_URL=https://api-sandbox.doku.com
+DOKU_TIMEOUT_SECONDS=10
+```
+
+| Status DOKU | Status internal provider |
+| --- | --- |
+| `SUCCESS`, `PAID`, `SETTLED` | `COMPLETED` |
+| `PENDING`, `PROCESSING` | `PENDING` |
+| `FAILED`, `EXPIRED`, `CANCELLED`, `CANCELED` | `FAILED` |
+| `REFUNDED`, `PARTIAL_REFUND` | `REFUNDED` |
+| Status lain | `UNKNOWN` dan perlu reconciliation/manual review |
+
+> Client ID dan Secret Key tidak boleh dikirim ke frontend atau disimpan di repository.
+> Notification/webhook DOKU masih perlu diimplementasikan dan diverifikasi menggunakan
+> komponen signature yang dikirim DOKU.
+
+---
+
+## Contoh Integrasi NICEPAY
+
+NICEPAY ditambahkan sebagai provider keempat dengan nama `NICEPAY`. Contoh adapter ini
+mengacu pada [NICEPAY API Documentation](https://docs.nicepay.co.id/nicepay-api) dan flow
+Professional/Checkout v1.
+
+- Registration menggunakan `POST /nicepay/api/v1.0/registration`.
+- `merchant_reference` dipakai sebagai `referenceNo`.
+- `amount` dipakai sebagai `amt` dan saat ini dibatasi ke `IDR`.
+- `merchantToken` adalah SHA-256 dari `timeStamp + iMid + referenceNo + amt + merchantKey`.
+- `paymentURL` dari response menjadi `payment_url` SPO.
+- Payment method dapat dikonfigurasi; nilai contoh `01` digunakan untuk flow kartu/redirect.
+
+```env
+NICEPAY_IMID=your-sandbox-imid
+NICEPAY_MERCHANT_KEY=your-sandbox-merchant-key
+NICEPAY_BASE_URL=https://dev.nicepay.co.id
+NICEPAY_PAY_METHOD=01
+NICEPAY_TIMEOUT_SECONDS=10
+```
+
+> **Batasan contoh:** inquiry NICEPAY membutuhkan `tXid`, `referenceNo`, dan `amt` untuk
+> membentuk request dan `merchantToken`. Kontrak `PaymentProvider::get_payment_status()`
+> saat ini hanya menerima satu provider payment ID. Karena itu, create/registration sudah
+> dicontohkan tetapi status inquiry belum diaktifkan dan akan mengembalikan
+> `INQUIRY_CONTEXT_REQUIRED`. Application service perlu mengambil reference dan amount dari
+> payment record atau kontrak status provider perlu diperluas sebelum reconciliation NICEPAY
+> dapat digunakan.
+
+Field customer, billing, serta payment-method-specific wajib disesuaikan dengan produk yang
+diaktifkan pada akun merchant NICEPAY. Credential Sandbox tidak boleh disimpan di repository.
 
 ---
 

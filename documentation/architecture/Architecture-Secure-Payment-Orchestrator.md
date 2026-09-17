@@ -218,7 +218,9 @@ pub trait PaymentProvider: Send + Sync {
 
 Setiap provider mengimplementasikan trait di atas. Provider internal Alpha dipetakan ke
 Midtrans Sandbox melalui Snap API untuk create payment dan Core API untuk status lookup;
-Beta dipetakan ke Xendit Payment Link/Invoice API dan Gamma masih berupa simulator lokal.
+Beta dipetakan ke Xendit Payment Link/Invoice API, Gamma dipetakan ke DOKU Checkout API,
+dan NICEPAY ditambahkan sebagai contoh adapter Checkout/Professional v1. Inquiry NICEPAY
+masih memerlukan perluasan konteks status provider.
 
 ---
 
@@ -594,19 +596,21 @@ Digunakan untuk mencegah race condition pada operasi concurrent:
 flowchart TB
     subgraph Docker_Network["Docker Network"]
         API["SPO API\n(Rust / Axum)\nPort 8080"]
-        GAMMA["Gamma Simulator\n(Rust / Axum)\nPort 9093"]
         PG[("PostgreSQL\nPort 5432")]
         RD[("Redis\nPort 6379")]
     end
     MIDTRANS["Midtrans Sandbox\nSnap + Core API"]
     XENDIT["Xendit Test Mode\nInvoice API"]
+    DOKU["DOKU Sandbox\nCheckout API"]
+    NICEPAY["NICEPAY Sandbox\nCheckout v1 Example"]
 
     Merchant["Merchant App"] --> API
-    Provider["Provider Simulators"] --> API
+    Provider["Provider Webhooks"] --> API
 
     API --> MIDTRANS
     API --> XENDIT
-    API --> GAMMA
+    API --> DOKU
+    API --> NICEPAY
     API --> PG
     API --> RD
 ```
@@ -628,17 +632,18 @@ services:
       - XENDIT_SECRET_KEY=${XENDIT_SECRET_KEY}
       - XENDIT_CALLBACK_TOKEN=${XENDIT_CALLBACK_TOKEN}
       - XENDIT_BASE_URL=https://api.xendit.co
-      - GAMMA_BASE_URL=http://gamma-simulator:9093
+      - DOKU_CLIENT_ID=${DOKU_CLIENT_ID}
+      - DOKU_SECRET_KEY=${DOKU_SECRET_KEY}
+      - DOKU_BASE_URL=https://api-sandbox.doku.com
+      - NICEPAY_IMID=${NICEPAY_IMID}
+      - NICEPAY_MERCHANT_KEY=${NICEPAY_MERCHANT_KEY}
+      - NICEPAY_BASE_URL=https://dev.nicepay.co.id
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
 
-  gamma-simulator:
-    build: ./simulators/gamma
-    ports:
-      - "9093:9093"
 
   postgres:
     image: postgres:16-alpine

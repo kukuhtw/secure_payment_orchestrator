@@ -23,10 +23,10 @@ masih berupa skeleton atau belum dibuat.
 
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 17 | 29% |
-| Parsial | 14 | 24% |
+| Selesai | 17 | 28% |
+| Parsial | 15 | 25% |
 | Belum | 28 | 47% |
-| **Total** | **59** | **100%** |
+| **Total** | **60** | **100%** |
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
 kesiapan production. Walaupun sebagian fondasi tersedia, core payment flow belum dapat digunakan
@@ -89,12 +89,13 @@ karena handler API masih mengembalikan `NOT_IMPLEMENTED`.
 | Cancel payment | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 | Manual retry endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 
-### 3.5 Provider integration dan fallback — 2 selesai, 2 parsial, 4 belum
+### 3.5 Provider integration dan fallback — 2 selesai, 3 parsial, 4 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Canonical `PaymentProvider` contract | Selesai | Trait, request, response, dan error types tersedia |
-| Midtrans/Xendit/Gamma provider adapters | Selesai | Alpha dipetakan ke Midtrans, Beta ke Xendit test mode, dan Gamma tetap simulator |
+| Midtrans/Xendit/DOKU provider adapters | Selesai | Alpha dipetakan ke Midtrans, Beta ke Xendit, dan Gamma ke DOKU Sandbox |
+| NICEPAY example adapter | Parsial | Registration/create tersedia; inquiry memerlukan referenceNo dan amt yang belum dibawa kontrak status provider |
 | Provider availability contract | Parsial | Midtrans unavailable jika Server Key kosong; health/circuit breaker runtime belum tersedia |
 | Failover data model | Parsial | `AttemptType::Failover` tersedia; flow belum diimplementasikan |
 | Provider selection by availability/priority | Belum | Application provider service masih skeleton |
@@ -155,9 +156,10 @@ karena handler API masih mengembalikan `NOT_IMPLEMENTED`.
 5. Payment aggregate, Money, payment status, dan transition rules.
 6. Retry classification dan exponential-backoff calculation.
 7. Repository traits.
-8. Provider adapter contract, Midtrans Snap/status adapter, Xendit Invoice/status adapter, serta simulator Gamma.
-9. Dockerfile dan Docker Compose.
-10. API contract dan OpenAPI specification.
+8. Provider adapter contract serta adapter create/status untuk Midtrans, Xendit, dan DOKU.
+9. Contoh registration/create payment NICEPAY; inquiry masih parsial.
+10. Dockerfile dan Docker Compose.
+11. API contract dan OpenAPI specification.
 
 ## 5. Daftar yang Belum Selesai
 

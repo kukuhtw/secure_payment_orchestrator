@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod alpha;
 pub mod beta;
 pub mod gamma;
+pub mod nicepay;
 
 use crate::config::settings::Settings;
 
@@ -26,6 +27,13 @@ pub fn build_providers(
             &settings.doku_secret_key,
             &settings.doku_base_url,
             settings.doku_timeout_seconds,
+        )?),
+        Box::new(nicepay::NicepayProvider::new(
+            &settings.nicepay_imid,
+            &settings.nicepay_merchant_key,
+            &settings.nicepay_base_url,
+            &settings.nicepay_pay_method,
+            settings.nicepay_timeout_seconds,
         )?),
     ];
 

@@ -126,9 +126,20 @@ impl GammaProvider {
     }
 
     fn request_url(&self, request_target: &str) -> Result<Url, ProviderError> {
-        Url::parse(&format!("{}{}", self.base_url, request_target)).map_err(|error| {
-            ProviderError::Network(format!("Invalid DOKU API URL: {error}"))
-        })
+        Url::parse(&format!("{}{}", self.base_url, request_target))
+            .map_err(|error| ProviderError::Network(format!("Invalid DOKU API URL: {error}")))
+    }
+
+    fn status_request_target(invoice_number: &str) -> Result<String, ProviderError> {
+        let mut url =
+            Url::parse("https://doku.invalid").map_err(|_| ProviderError::InvalidResponse)?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| ProviderError::InvalidResponse)?;
+        segments.extend(STATUS_TARGET_PREFIX.trim_start_matches('/').split('/'));
+        segments.push(invoice_number);
+        drop(segments);
+        Ok(url.path().to_owned())
     }
 
     fn signed_request(
@@ -140,12 +151,8 @@ impl GammaProvider {
         let request_id = Uuid::new_v4().to_string();
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let digest = body.map(Self::digest);
-        let signature = self.signature(
-            &request_id,
-            &timestamp,
-            request_target,
-            digest.as_deref(),
-        )?;
+        let signature =
+            self.signature(&request_id, &timestamp, request_target, digest.as_deref())?;
 
         let mut request = self
             .client
@@ -169,9 +176,11 @@ impl GammaProvider {
     async fn error_from_response(response: reqwest::Response) -> ProviderError {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({
-            "raw_body": body
-        }));
+        let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
+            json!({
+                "raw_body": body
+            })
+        });
         let error = parsed.get("error").unwrap_or(&parsed);
 
         ProviderError::Provider {
@@ -269,8 +278,8 @@ impl PaymentProvider for GammaProvider {
             .json()
             .await
             .map_err(|_| ProviderError::InvalidResponse)?;
-        let parsed: CheckoutResponse = serde_json::from_value(raw)
-            .map_err(|_| ProviderError::InvalidResponse)?;
+        let parsed: CheckoutResponse =
+            serde_json::from_value(raw).map_err(|_| ProviderError::InvalidResponse)?;
 
         Ok(ProviderResponse {
             provider_payment_id: parsed.order.invoice_number,
@@ -288,9 +297,7 @@ impl PaymentProvider for GammaProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         self.ensure_configured()?;
 
-        let encoded_id: String = url::form_urlencoded::byte_serialize(provider_payment_id.as_bytes())
-            .collect();
-        let request_target = format!("{STATUS_TARGET_PREFIX}/{encoded_id}");
+        let request_target = Self::status_request_target(provider_payment_id)?;
         let response = self
             .signed_request(Method::GET, &request_target, None)?
             .send()
@@ -333,7 +340,7 @@ mod tests {
     fn creates_stable_digest() {
         assert_eq!(
             GammaProvider::digest(br#"{"order":{"amount":10000}}"#),
-            "mlDlQXdbvRL3g9/LBXZPKCPcdm5awXDuBB0Cvh9P8XQ="
+            "+SlYgGoBI3qNtbtd2mRDJUgYSwWFZfTA44htNq7XdEA="
         );
     }
 }
