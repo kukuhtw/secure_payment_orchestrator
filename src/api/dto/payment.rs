@@ -1,9 +1,11 @@
 //! Payment-related DTOs (request & response).
 
 use crate::api::dto::error::ApiError;
+use crate::application::payment::SearchPaymentsFilter;
 use crate::domain::payment::Payment;
+use crate::domain::repositories::{PaginatedResult, PaymentSummaryRow};
 use axum::http::StatusCode;
-use chrono::SecondsFormat;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,6 +14,13 @@ use std::collections::HashMap;
 const MERCHANT_REFERENCE_MAX_LEN: usize = 255;
 /// No DB limit on `description` (`TEXT`) — this is an operational sanity cap.
 const DESCRIPTION_MAX_LEN: usize = 1000;
+/// No DB limit on `failure_reason` (`TEXT`, reused for cancel reason) — an
+/// operational sanity cap, matching the API contract's "reason melebihi
+/// batas karakter" 400 error condition.
+const REASON_MAX_LEN: usize = 1000;
+const DEFAULT_PAGE: i32 = 1;
+const DEFAULT_LIMIT: i32 = 20;
+const MAX_LIMIT: i32 = 100;
 
 // ─── Create Payment ─────────────────────────────────────
 
@@ -123,6 +132,59 @@ pub struct CancelPaymentRequest {
     pub reason: Option<String>,
 }
 
+impl CancelPaymentRequest {
+    /// Matches the API contract's "400 Bad Request jika reason melebihi
+    /// batas karakter" error condition for `POST /payments/{id}/cancel`.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        let Some(reason) = &self.reason else {
+            return Ok(());
+        };
+
+        if reason.len() > REASON_MAX_LEN {
+            let mut details = HashMap::new();
+            details.insert(
+                "reason".into(),
+                Value::String(format!("must be at most {REASON_MAX_LEN} characters")),
+            );
+            return Err(ApiError::with_details(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "Request validation failed",
+                details,
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CancelPaymentResponse {
+    pub data: CancelPaymentData,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CancelPaymentData {
+    pub payment_id: String,
+    pub status: String,
+    pub cancelled_at: String,
+}
+
+impl From<Payment> for CancelPaymentResponse {
+    fn from(payment: Payment) -> Self {
+        Self {
+            data: CancelPaymentData {
+                payment_id: payment.id.to_string(),
+                status: payment.status.to_string(),
+                cancelled_at: payment
+                    .completed_at
+                    .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+                    .unwrap_or_default(),
+            },
+        }
+    }
+}
+
 // ─── Search Payments ────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +196,77 @@ pub struct SearchPaymentParams {
     pub to_date: Option<String>,
     pub page: Option<i32>,
     pub limit: Option<i32>,
+}
+
+impl SearchPaymentParams {
+    /// Applies defaults (`page=1`, `limit=20`), bounds (`1 <= limit <= 100`),
+    /// and parses `from_date`/`to_date` as RFC 3339. Collects all violations
+    /// into one `400 VALIDATION_ERROR`, same pattern as
+    /// `CreatePaymentRequest::validate`.
+    pub fn into_filter(self) -> Result<SearchPaymentsFilter, ApiError> {
+        let mut details: HashMap<String, Value> = HashMap::new();
+
+        let page = match self.page {
+            None => DEFAULT_PAGE,
+            Some(p) if p >= 1 => p,
+            Some(_) => {
+                details.insert("page".into(), Value::String("must be >= 1".into()));
+                DEFAULT_PAGE
+            }
+        };
+
+        let limit = match self.limit {
+            None => DEFAULT_LIMIT,
+            Some(l) if (1..=MAX_LIMIT).contains(&l) => l,
+            Some(_) => {
+                details.insert(
+                    "limit".into(),
+                    Value::String(format!("must be between 1 and {MAX_LIMIT}")),
+                );
+                DEFAULT_LIMIT
+            }
+        };
+
+        let from_date = parse_optional_date(self.from_date.as_deref(), "from_date", &mut details);
+        let to_date = parse_optional_date(self.to_date.as_deref(), "to_date", &mut details);
+
+        if !details.is_empty() {
+            return Err(ApiError::with_details(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "Request validation failed",
+                details,
+            ));
+        }
+
+        Ok(SearchPaymentsFilter {
+            merchant_reference: self.merchant_reference,
+            status: self.status,
+            provider: self.provider,
+            from_date,
+            to_date,
+            page: page as i64,
+            limit: limit as i64,
+        })
+    }
+}
+
+fn parse_optional_date(
+    value: Option<&str>,
+    field: &str,
+    details: &mut HashMap<String, Value>,
+) -> Option<DateTime<Utc>> {
+    let value = value?;
+    match DateTime::parse_from_rfc3339(value) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        Err(_) => {
+            details.insert(
+                field.to_string(),
+                Value::String("must be a valid RFC 3339 date-time".into()),
+            );
+            None
+        }
+    }
 }
 
 // ─── Responses ──────────────────────────────────────────
@@ -207,6 +340,42 @@ pub struct Pagination {
     pub limit: i32,
     pub total_items: i64,
     pub total_pages: i32,
+}
+
+impl From<PaymentSummaryRow> for PaymentSummary {
+    fn from(row: PaymentSummaryRow) -> Self {
+        Self {
+            payment_id: row.id.to_string(),
+            merchant_reference: row.merchant_reference,
+            status: row.status,
+            amount: row.amount,
+            currency: row.currency,
+            provider: row.provider.unwrap_or_default(),
+            created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        }
+    }
+}
+
+impl From<PaginatedResult<PaymentSummaryRow>> for SearchPaymentsResponse {
+    fn from(result: PaginatedResult<PaymentSummaryRow>) -> Self {
+        let total_pages = if result.limit > 0 {
+            ((result.total + result.limit - 1) / result.limit) as i32
+        } else {
+            0
+        };
+
+        Self {
+            data: SearchPaymentsData {
+                payments: result.items.into_iter().map(PaymentSummary::from).collect(),
+                pagination: Pagination {
+                    page: result.page as i32,
+                    limit: result.limit as i32,
+                    total_items: result.total,
+                    total_pages,
+                },
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -403,5 +572,125 @@ mod tests {
         let response: PaymentResponse = payment.into();
 
         assert_eq!(response.data.provider, "");
+    }
+
+    #[test]
+    fn cancel_response_maps_status_and_cancelled_at() {
+        let money = Money::new(1000, "IDR").unwrap();
+        let mut payment = Payment::new(Uuid::new_v4(), "key".into(), "REF".into(), money, None);
+        payment.status = crate::domain::status::PaymentStatus::Cancelled;
+        payment.completed_at = Some(payment.updated_at);
+
+        let response: CancelPaymentResponse = payment.clone().into();
+
+        assert_eq!(response.data.payment_id, payment.id.to_string());
+        assert_eq!(response.data.status, "CANCELLED");
+        assert!(response.data.cancelled_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn cancel_request_accepts_missing_reason() {
+        let req = CancelPaymentRequest { reason: None };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn cancel_request_rejects_reason_too_long() {
+        let req = CancelPaymentRequest {
+            reason: Some("x".repeat(REASON_MAX_LEN + 1)),
+        };
+        let err = req.validate().unwrap_err();
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert!(err.error.details.unwrap().contains_key("reason"));
+    }
+
+    #[test]
+    fn search_params_applies_defaults() {
+        let params = SearchPaymentParams {
+            merchant_reference: None,
+            status: None,
+            provider: None,
+            from_date: None,
+            to_date: None,
+            page: None,
+            limit: None,
+        };
+        let filter = params.into_filter().expect("defaults should be valid");
+        assert_eq!(filter.page, 1);
+        assert_eq!(filter.limit, 20);
+    }
+
+    #[test]
+    fn search_params_rejects_invalid_page_and_limit() {
+        let params = SearchPaymentParams {
+            merchant_reference: None,
+            status: None,
+            provider: None,
+            from_date: None,
+            to_date: None,
+            page: Some(0),
+            limit: Some(500),
+        };
+        let err = params.into_filter().unwrap_err();
+        let details = err.error.details.unwrap();
+        assert!(details.contains_key("page"));
+        assert!(details.contains_key("limit"));
+    }
+
+    #[test]
+    fn search_params_parses_valid_dates() {
+        let params = SearchPaymentParams {
+            merchant_reference: None,
+            status: None,
+            provider: None,
+            from_date: Some("2026-09-01T00:00:00Z".into()),
+            to_date: Some("2026-09-17T23:59:59Z".into()),
+            page: None,
+            limit: None,
+        };
+        let filter = params.into_filter().expect("valid dates should parse");
+        assert!(filter.from_date.is_some());
+        assert!(filter.to_date.is_some());
+    }
+
+    #[test]
+    fn search_params_rejects_malformed_date() {
+        let params = SearchPaymentParams {
+            merchant_reference: None,
+            status: None,
+            provider: None,
+            from_date: Some("not-a-date".into()),
+            to_date: None,
+            page: None,
+            limit: None,
+        };
+        let err = params.into_filter().unwrap_err();
+        assert!(err.error.details.unwrap().contains_key("from_date"));
+    }
+
+    #[test]
+    fn maps_paginated_result_to_search_response() {
+        let now = chrono::Utc::now();
+        let result = PaginatedResult {
+            items: vec![PaymentSummaryRow {
+                id: Uuid::new_v4(),
+                merchant_reference: "ORDER-10001".into(),
+                status: "PENDING".into(),
+                amount: 250_000,
+                currency: "IDR".into(),
+                provider: Some("MIDTRANS".into()),
+                created_at: now,
+            }],
+            total: 21,
+            page: 1,
+            limit: 20,
+        };
+
+        let response: SearchPaymentsResponse = result.into();
+
+        assert_eq!(response.data.payments.len(), 1);
+        assert_eq!(response.data.payments[0].merchant_reference, "ORDER-10001");
+        assert_eq!(response.data.pagination.total_items, 21);
+        assert_eq!(response.data.pagination.total_pages, 2);
     }
 }

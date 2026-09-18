@@ -73,7 +73,7 @@ async fn get_payment(
         .payment_service
         .get_payment(merchant.merchant_id, payment_id)
         .await
-        .map_err(|err| map_get_payment_error(err, payment_id))?;
+        .map_err(|err| map_payment_lookup_error(err, payment_id))?;
 
     Ok(Json(payment.into()))
 }
@@ -83,6 +83,16 @@ fn map_application_error(err: ApplicationError) -> ApiError {
     match err {
         ApplicationError::Domain(DomainError::Validation(msg)) => ApiError::bad_request(msg),
         ApplicationError::Domain(DomainError::Conflict(msg)) => ApiError::conflict("CONFLICT", msg),
+        ApplicationError::Domain(DomainError::AlreadyFinal(status)) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PAYMENT_ALREADY_FINAL",
+            format!("Payment is already in a final state: {status}"),
+        ),
+        ApplicationError::Domain(DomainError::InvalidTransition { from, to }) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_STATUS_TRANSITION",
+            format!("Cannot transition payment from {from} to {to}"),
+        ),
         ApplicationError::Domain(other) => {
             tracing::error!("unexpected domain error in payment handler: {other}");
             ApiError::internal()
@@ -104,8 +114,9 @@ fn map_application_error(err: ApplicationError) -> ApiError {
 }
 
 /// Like [`map_application_error`], but reshapes `NotFound` into the
-/// `PAYMENT_NOT_FOUND` code/details documented for `GET /payments/{id}`.
-fn map_get_payment_error(err: ApplicationError, payment_id: Uuid) -> ApiError {
+/// `PAYMENT_NOT_FOUND` code/details documented for `GET /payments/{id}` and
+/// `POST /payments/{id}/cancel`.
+fn map_payment_lookup_error(err: ApplicationError, payment_id: Uuid) -> ApiError {
     match err {
         ApplicationError::Domain(DomainError::NotFound(_)) => {
             let mut details = HashMap::new();
@@ -126,21 +137,47 @@ fn map_get_payment_error(err: ApplicationError, payment_id: Uuid) -> ApiError {
 
 async fn search_payments(
     State(state): State<SharedState>,
+    Extension(merchant): Extension<MerchantContext>,
     Query(params): Query<SearchPaymentParams>,
 ) -> Result<Json<SearchPaymentsResponse>, ApiError> {
-    // TODO: Implement search payments
     tracing::info!("Search payments: {:?}", params);
-    Err(ApiError::not_implemented("search_payments"))
+
+    let filter = params.into_filter()?;
+
+    let result = state
+        .payment_service
+        .search_payments(merchant.merchant_id, filter)
+        .await
+        .map_err(map_application_error)?;
+
+    Ok(Json(result.into()))
 }
 
 async fn cancel_payment(
     State(state): State<SharedState>,
+    Extension(merchant): Extension<MerchantContext>,
     Path(payment_id): Path<String>,
     Json(req): Json<CancelPaymentRequest>,
-) -> Result<Json<PaymentResponse>, ApiError> {
-    // TODO: Implement cancel payment
+) -> Result<Json<CancelPaymentResponse>, ApiError> {
     tracing::info!("Cancel payment: {}", payment_id);
-    Err(ApiError::not_implemented("cancel_payment"))
+
+    req.validate()?;
+
+    let payment_id = Uuid::parse_str(&payment_id)
+        .map_err(|_| ApiError::bad_request("Invalid payment_id format"))?;
+
+    let payment = state
+        .payment_service
+        .cancel_payment(
+            merchant.merchant_id,
+            merchant.api_key_id,
+            payment_id,
+            req.reason,
+        )
+        .await
+        .map_err(|err| map_payment_lookup_error(err, payment_id))?;
+
+    Ok(Json(payment.into()))
 }
 
 async fn retry_payment(
@@ -196,7 +233,7 @@ mod tests {
     fn maps_not_found_to_payment_not_found_with_details() {
         let payment_id = Uuid::new_v4();
         let err = ApplicationError::Domain(DomainError::NotFound("Payment not found".into()));
-        let api_err = map_get_payment_error(err, payment_id);
+        let api_err = map_payment_lookup_error(err, payment_id);
 
         assert_eq!(api_err.status_code, StatusCode::NOT_FOUND);
         assert_eq!(api_err.error.code, "PAYMENT_NOT_FOUND");
@@ -207,11 +244,34 @@ mod tests {
     }
 
     #[test]
-    fn get_payment_error_falls_through_to_generic_mapping() {
+    fn payment_lookup_error_falls_through_to_generic_mapping() {
         let err = ApplicationError::NoProviderAvailable;
-        let api_err = map_get_payment_error(err, Uuid::new_v4());
+        let api_err = map_payment_lookup_error(err, Uuid::new_v4());
 
         assert_eq!(api_err.status_code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(api_err.error.code, "PROVIDER_UNAVAILABLE");
+    }
+
+    #[test]
+    fn maps_already_final_to_422() {
+        let err = ApplicationError::Domain(DomainError::AlreadyFinal(
+            crate::domain::status::PaymentStatus::Success,
+        ));
+        let api_err = map_application_error(err);
+
+        assert_eq!(api_err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(api_err.error.code, "PAYMENT_ALREADY_FINAL");
+    }
+
+    #[test]
+    fn maps_invalid_transition_to_422() {
+        let err = ApplicationError::Domain(DomainError::InvalidTransition {
+            from: crate::domain::status::PaymentStatus::Pending,
+            to: crate::domain::status::PaymentStatus::Success,
+        });
+        let api_err = map_application_error(err);
+
+        assert_eq!(api_err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(api_err.error.code, "INVALID_STATUS_TRANSITION");
     }
 }

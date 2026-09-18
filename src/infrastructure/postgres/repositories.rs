@@ -231,13 +231,17 @@ impl PaymentRepository for PgPaymentRepository {
                  AND ($2::text IS NULL OR merchant_reference = $2)
                  AND ($3::text IS NULL OR status = $3)
                  AND ($4::text IS NULL OR provider = $4)
+                 AND ($5::timestamptz IS NULL OR created_at >= $5)
+                 AND ($6::timestamptz IS NULL OR created_at <= $6)
                ORDER BY created_at DESC
-               LIMIT $5 OFFSET $6"#,
+               LIMIT $7 OFFSET $8"#,
         )
         .bind(criteria.merchant_id)
         .bind(&criteria.merchant_reference)
         .bind(&criteria.status)
         .bind(&criteria.provider)
+        .bind(criteria.from_date)
+        .bind(criteria.to_date)
         .bind(criteria.limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -248,12 +252,16 @@ impl PaymentRepository for PgPaymentRepository {
             r#"SELECT COUNT(*) FROM payments WHERE merchant_id = $1
                AND ($2::text IS NULL OR merchant_reference = $2)
                AND ($3::text IS NULL OR status = $3)
-               AND ($4::text IS NULL OR provider = $4)"#,
+               AND ($4::text IS NULL OR provider = $4)
+               AND ($5::timestamptz IS NULL OR created_at >= $5)
+               AND ($6::timestamptz IS NULL OR created_at <= $6)"#,
         )
         .bind(criteria.merchant_id)
         .bind(&criteria.merchant_reference)
         .bind(&criteria.status)
         .bind(&criteria.provider)
+        .bind(criteria.from_date)
+        .bind(criteria.to_date)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| DomainError::Validation(e.to_string()))?;
