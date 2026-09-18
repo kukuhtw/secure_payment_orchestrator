@@ -4,11 +4,11 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi report | 15.0 |
+| Versi report | 16.0 |
 | Tanggal audit | 18 September 2026 |
 | Status produk | Proof of Concept, belum production-ready |
 | Dasar penilaian | `cargo build`, `cargo test`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
-| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (75/75 test lulus), `cargo fmt -- --check` lulus tanpa isu |
+| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (84/84 test lulus), `cargo fmt -- --check` lulus tanpa isu |
 
 ## 1. Ringkasan Eksekutif
 
@@ -132,23 +132,51 @@ yang belum dimulai):
 walau didaftarkan belakangan (bukan "first in Vec"), dan provider unavailable
 di-skip meski priority-nya lebih baik daripada provider available lain.
 
+Pass v16.0 memulai backlog P1: circuit breaker per provider (§5 P1 item 4), state
+machine yang confignya sudah ada sejak awal proyek (`circuit_breaker_threshold`,
+`circuit_breaker_timeout_seconds`) tapi tidak pernah dipakai runtime mana pun:
+
+- **`CircuitBreakerProvider` baru** (`providers/circuit_breaker.rs`) — dekorator yang
+  membungkus `Box<dyn PaymentProvider>` mana pun, bukan menyentuh 4 adapter yang ada.
+  State CLOSED (normal) / OPEN (>= `failure_threshold` kegagalan berturut-turut,
+  langsung dianggap unavailable) / HALF_OPEN (setelah `open_duration` lewat, izinkan
+  1 probe — sukses → CLOSED, gagal → OPEN lagi), sesuai §6.3 architecture doc persis
+  (default 5 kegagalan, 30 detik).
+- **`providers::build_providers` membungkus keempat adapter** dengan ini — jadi
+  `PaymentService::select_best_provider` (v15.0) otomatis jadi circuit-breaker-aware
+  tanpa menyentuh `application/payment.rs` sama sekali (dekorator transparan di
+  belakang trait `PaymentProvider` yang sama).
+- **HALF_OPEN disederhanakan** — direpresentasikan sebagai "OPEN yang durasinya sudah
+  lewat" (dihitung `Instant::elapsed()` on-the-fly di `is_available()`, bukan state
+  tersimpan terpisah), bukan 3 variant literal. Ini artinya beberapa request konkuren
+  yang datang tepat setelah durasi OPEN lewat semua bisa lolos sebagai probe — bukan
+  ditegakkan ketat "1 request saja". Trade-off yang disengaja: opsi yang benar butuh
+  flag "probe sedang berlangsung" tambahan untuk single-process concurrency, dianggap
+  di luar scope untuk breaker in-memory sederhana ini.
+- **In-memory per-proses saja** — bukan Redis/DB. Deployment multi-instance perlu
+  state bersama untuk koordinasi circuit breaker lintas proses; di luar scope pass ini.
+
+9 unit test baru untuk `CircuitBreakerProvider` (closed by default, delegasi
+name/priority, tetap unavailable kalau inner unavailable, tetap closed di bawah
+threshold, terbuka setelah threshold tercapai, counter reset saat sukses, probe
+terbuka lagi setelah durasi lewat, probe gagal membuka ulang, probe sukses menutup).
+
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 34 | 57% |
+| Selesai | 35 | 58% |
 | Parsial | 13 | 22% |
-| Belum | 13 | 22% |
+| Belum | 12 | 20% |
 | **Total** | **60** | **100%** |
 
-Dibanding v14.0 (33 selesai / 14 parsial / 13 belum), satu task naik dari Parsial ke
-Selesai: "Provider selection by availability/priority" (§3.5) — kolom `priority`
-sekarang genuinely dari config, bukan lagi placeholder "first available". Tidak ada
-task yang turun status.
+Dibanding v15.0 (34 selesai / 13 parsial / 13 belum), satu task naik dari Belum ke
+Selesai: "Circuit breaker" (§3.5). Tidak ada task yang turun status.
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
-kesiapan production. Idempotency write-side (v14.0) dan provider selection (v15.0)
-**belum ditest terhadap Postgres/environment sungguhan** — sama seperti seluruh jalur
-lain di report ini. Reconcile (v13.0) juga masih belum bisa dipicu lewat flow lain
-mana pun.
+kesiapan production. Circuit breaker baru diverifikasi lewat unit test dengan fake
+provider dan real (non-mocked) wall-clock time — belum pernah diuji terhadap provider
+sungguhan yang benar-benar gagal berulang kali. Idempotency write-side (v14.0) dan
+provider selection (v15.0) juga masih **belum ditest terhadap Postgres/environment
+sungguhan**. Reconcile (v13.0) juga masih belum bisa dipicu lewat flow lain mana pun.
 
 ## 2. Definisi Status
 
@@ -208,18 +236,18 @@ mana pun.
 | Manual retry endpoint | Selesai (naik dari Belum) | `src/api/routes/payment.rs::retry_payment` — cek `MerchantContext::is_operations()` (403 kalau bukan), panggil `PaymentService::retry_payment`, balas `200 OK` dengan `RetryPaymentResponse` (`{payment_id, status, attempt_number, provider, message}` sesuai API contract §3.5). Eligibility pakai `PaymentStatus::is_retryable()`, dibatasi `MAX_RETRY_ATTEMPTS`, atomic via `update_status_with_attempt_and_audit`. Seleksi provider masih naif (sama seperti create). **Belum ditest terhadap Postgres sungguhan** |
 | Reconcile payment endpoint | Selesai (naik dari Belum) | `src/api/routes/payment.rs::reconcile_payment` — cek `MerchantContext::is_operations()` (403 kalau bukan), panggil `PaymentService::reconcile_payment`, balas `200 OK` dengan `ReconcileResponse` (`{payment_id, previous_status, current_status, provider_status, resolution, reconciled_at}`). Eligibility pakai `PaymentStatus::needs_reconciliation()` (status harus `PENDING_RECONCILIATION`), query provider dari attempt terakhir, atomic via `PaymentTransactionRepository::reconcile` (lihat §3.3, §3.6). **Belum ditest terhadap Postgres sungguhan, dan belum bisa dipicu lewat flow lain mana pun** (tidak ada worker yang mentransisikan payment ke `PENDING_RECONCILIATION` — lihat §3.6, §7) |
 
-### 3.5 Provider integration dan fallback — 3 selesai, 3 parsial, 3 belum
+### 3.5 Provider integration dan fallback — 4 selesai, 3 parsial, 2 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Canonical `PaymentProvider` contract | Selesai | `src/providers/adapter.rs` — trait, request, response, error types. Sejak v15.0, trait dapat method baru `priority() -> i32` (wajib diimplementasikan semua adapter) |
 | Midtrans/Xendit/DOKU provider adapters | Selesai | Alpha (277 baris), Beta (232 baris), Gamma (346 baris) — Midtrans, Xendit, DOKU Sandbox |
 | NICEPAY example adapter | Parsial | Registration/create tersedia (269 baris); inquiry memerlukan referenceNo dan amt yang belum dibawa kontrak status provider |
-| Provider availability contract | Parsial | `is_available()` di trait; Midtrans unavailable jika Server Key kosong; health/circuit breaker runtime belum tersedia (lihat baris "Circuit breaker" di bawah — masih terpisah dari seleksi prioritas) |
+| Provider availability contract | Parsial | `is_available()` di trait; tiap adapter mentah (Alpha/Beta/Gamma/Nicepay) sendiri masih cuma cek konfigurasi (mis. Server Key kosong) — TIDAK tahu soal circuit breaker. Yang benar-benar dipakai `PaymentService` adalah versi yang dibungkus `CircuitBreakerProvider` (lihat baris "Circuit breaker" di bawah), bukan adapter mentah — makanya baris ini tetap Parsial, bukan Selesai |
 | Failover data model | Parsial | `AttemptType::Failover` tersedia; flow belum diimplementasikan |
-| Provider selection by availability/priority | Selesai (naik dari Parsial) | `select_best_provider` (`application/payment.rs`, dipakai `create_payment` dan `retry_payment`) sekarang memilih provider dengan `priority()` terkecil di antara yang `is_available()` — bukan lagi "provider pertama di `Vec`". Priority per-provider datang dari config (`Settings::midtrans_priority`/`xendit_priority`/`doku_priority`/`nicepay_priority`, env var `*_PRIORITY`), bukan hardcoded. **Circuit-breaker-awareness dalam seleksi ini TIDAK termasuk** — itu baris "Circuit breaker" terpisah di bawah, masih Belum |
+| Provider selection by availability/priority | Selesai (naik dari Parsial) | `select_best_provider` (`application/payment.rs`, dipakai `create_payment` dan `retry_payment`) sekarang memilih provider dengan `priority()` terkecil di antara yang `is_available()` — bukan lagi "provider pertama di `Vec`". Priority per-provider datang dari config (`Settings::midtrans_priority`/`xendit_priority`/`doku_priority`/`nicepay_priority`, env var `*_PRIORITY`), bukan hardcoded. Sejak v16.0, `is_available()` yang dipanggil di sini genuinely circuit-breaker-aware (lihat baris "Circuit breaker") |
 | Timeout wrapper dan response classification | Belum | Belum ada orchestration implementation |
-| Circuit breaker | Belum | Hanya config (`circuit_breaker_threshold`, `circuit_breaker_timeout_seconds` di `settings.rs`); tidak ada state machine/runtime. `is_available()`/`select_best_provider` (v15.0) tidak memeriksa circuit breaker state karena belum ada yang melacaknya |
+| Circuit breaker | Selesai (naik dari Belum) | `providers::circuit_breaker::CircuitBreakerProvider` (baru v16.0) — dekorator yang membungkus `Box<dyn PaymentProvider>`, state machine CLOSED/OPEN/HALF_OPEN sesuai §6.3 architecture doc (5 kegagalan berturut-turut → OPEN, 30 detik → HALF_OPEN, probe sukses → CLOSED / probe gagal → OPEN lagi). Konsumsi `circuit_breaker_threshold`/`circuit_breaker_timeout_seconds` dari `Settings` — config yang sejak awal ada tapi tidak pernah dipakai runtime mana pun. `providers::build_providers` membungkus keempat adapter dengan ini. State disimpan in-memory per-proses saja (bukan Redis/DB) — deployment multi-instance butuh state bersama, di luar scope. HALF_OPEN direpresentasikan sebagai "OPEN yang durasinya sudah lewat" (dihitung dari `Instant::elapsed()`, bukan state tersimpan terpisah) — simplifikasi yang disengaja: circuit breaker literal 3-state butuh flag "probe sedang berlangsung" tambahan untuk menegakkan "izinkan tepat 1 request" di bawah pemanggil konkuren, yang tidak dicoba diimplementasikan di sini. 9 unit test baru |
 | Automatic fallback A ke B | Belum | Belum ada routing, safe-failure decision, atau failover execution |
 
 ### 3.6 Reliability dan reconciliation — 1 selesai, 1 parsial, 3 belum
@@ -313,7 +341,7 @@ tapi tidak ada lagi item P0 yang open. Backlog berikutnya ada di P1.
 4. ~~Seed/tooling untuk membuat API key.~~ **Selesai pada v7.0** — `src/bin/gen_api_key.rs` + migration `20260917_002_seed_demo_api_keys.sql`. Belum dijalankan terhadap Postgres sungguhan (tidak ada Docker di environment ini).
 5. ~~Request validation.~~ **Selesai** untuk `CreatePaymentRequest` (v9.0), `CancelPaymentRequest`, dan `SearchPaymentParams` (v11.0) — lihat §3.4.
 6. ~~Payment application service.~~ **Selesai** — `PaymentService::create_payment`/`get_payment` (v7.0), `search_payments`/`cancel_payment` (v11.0), `retry_payment` (v12.0), `reconcile_payment` (v13.0) lengkap+tertest (lihat §3.4, §3.9).
-7. ~~Provider selection dan invocation.~~ **Selesai pada v15.0** (lihat §3.5) — `select_best_provider` memilih provider ber-`priority()` terkecil di antara yang `is_available()`, priority datang dari config (`Settings::*_priority`), dipakai `create_payment` (v7.0) dan `retry_payment` (v12.0). Circuit-breaker-awareness dalam seleksi ini TIDAK termasuk (P1 item #4, baris "Circuit breaker" di §3.5) — provider yang sedang degraded tapi belum "unavailable" secara config tetap bisa terpilih.
+7. ~~Provider selection dan invocation.~~ **Selesai pada v15.0** (lihat §3.5) — `select_best_provider` memilih provider ber-`priority()` terkecil di antara yang `is_available()`, priority datang dari config (`Settings::*_priority`), dipakai `create_payment` (v7.0) dan `retry_payment` (v12.0). Sejak v16.0, `is_available()` yang dikonsultasikan di sini genuinely circuit-breaker-aware lewat `CircuitBreakerProvider` (lihat P1 item #4 di bawah, sudah Selesai juga).
 8. ~~Create dan Get payment handlers.~~ **Selesai pada v8.0** — `src/api/routes/payment.rs::create_payment`/`get_payment` tersambung ke `PaymentService` (lihat §3.4). Belum ditest terhadap Postgres/Redis sungguhan.
 9. ~~Search dan Cancel payment handlers.~~ **Selesai pada v11.0** (lihat §3.4). Catatan: `cancel_payment` cuma mengubah status lokal, **tidak** memberi tahu provider (mis. void transaksi di gateway) — sesuai bentuk response yang didokumentasikan API contract §3.4 (tidak ada field provider), tapi worth diperiksa ulang kalau requirement sebenarnya butuh provider notification.
 10. ~~Manual retry endpoint.~~ **Selesai pada v12.0** (lihat §3.4) — operations-only (`403` kalau bukan), dibatasi `MAX_RETRY_ATTEMPTS`, atomic.
@@ -326,7 +354,7 @@ tapi tidak ada lagi item P0 yang open. Backlog berikutnya ada di P1.
 1. Provider timeout handling dan error classification.
 2. Retry orchestration/worker dengan bounded attempts.
 3. Reconciliation service otomatis/worker — deteksi payment uncertain dan transisi ke `PENDING_RECONCILIATION` (endpoint manual-nya sudah selesai di v13.0, lihat §3.4/§3.6/§5 P0 item 13).
-4. Circuit breaker per provider — state machine CLOSED/OPEN/HALF_OPEN (§6.3 architecture doc); config (`circuit_breaker_threshold`/`circuit_breaker_timeout_seconds`) sudah ada tapi belum dipakai. Priority-based selection sudah selesai di v15.0 (§3.5, §5 P0 item 7) TAPI itu terpisah dari ini — selection tidak tahu provider mana yang sedang degraded kalau `is_available()` masih `true`.
+4. ~~Circuit breaker per provider.~~ **Selesai pada v16.0** (lihat §3.5) — `providers::circuit_breaker::CircuitBreakerProvider`, dekorator `PaymentProvider` dengan state CLOSED/OPEN/HALF_OPEN sesuai §6.3 architecture doc, membungkus keempat adapter di `build_providers`. In-memory per-proses saja (bukan lintas-instance); HALF_OPEN disederhanakan jadi "OPEN yang durasinya sudah lewat" alih-alih flag "1 probe" yang ditegakkan ketat di bawah concurrent caller — dicatat sebagai trade-off yang disengaja, lihat §1 v16.0 dan komentar di `circuit_breaker.rs`.
 5. Safe automatic fallback dari Gateway A ke Gateway B.
 6. Locking antara retry, webhook, reconciliation, dan failover (lock helper sudah siap dipakai, tinggal diintegrasikan — reconcile endpoint v13.0 belum pakai `reconcile:{payment_id}` lock).
 7. Late webhook dan conflicting-status handling.
@@ -375,9 +403,10 @@ Milestone berikutnya dapat dianggap selesai jika:
 | Idempotency write-side belum ditest terhadap Postgres sungguhan | `INSERT INTO idempotency_keys` dalam transaksi atomic (v14.0) baru diverifikasi lewat fake trait di unit test — constraint PK `(idempotency_key, merchant_id)`, tipe kolom (`response_status_code VARCHAR(3)`, `response_body JSONB`), dan replay end-to-end belum pernah dijalankan lewat Postgres nyata | Jalankan integration test begitu Postgres tersedia — termasuk skenario replay duplicate request sungguhan |
 | Idempotency key reuse setelah expired bisa bentrok PK | `insert_idempotency_row` plain `INSERT` (bukan `ON CONFLICT`) — kalau idempotency key yang sama dipakai lagi setelah 24 jam TTL tapi baris lama belum dibersihkan (tidak ada cleanup job), insert akan gagal dan seluruh transaksi `create_payment` rollback, padahal seharusnya boleh dipakai ulang | Edge case sempit, dicatat sebagai known limitation; tambahkan `ON CONFLICT DO UPDATE` atau cleanup job kalau observasi produksi menunjukkan ini benar-benar terjadi |
 | Atomic transaction belum ditest terhadap Postgres sungguhan | `BEGIN`/`COMMIT`/`ROLLBACK` di `PgPaymentTransactionRepository` (create + retry + reconcile) baru diverifikasi lewat fake trait di unit test, belum lewat Postgres nyata | Jalankan integration test begitu Postgres tersedia |
-| Provider selection tidak circuit-breaker-aware | `select_best_provider` (v15.0) cuma cek `is_available()` (config) + `priority()` — provider yang sedang gagal berulang kali secara runtime (mis. timeout terus-menerus) tetap dianggap available dan bisa terus dipilih sampai config-nya diubah manual | Kerjakan P1 item 4 (circuit breaker state machine per provider) |
+| Circuit breaker state in-memory per-proses saja | Kalau `spo-api` dijalankan multi-instance (mis. beberapa pod di belakang load balancer), tiap instance punya state circuit breaker sendiri-sendiri — satu instance bisa menganggap provider OPEN (gagal terus) sementara instance lain masih CLOSED, jadi proteksi tidak konsisten lintas instance | Butuh state bersama (mis. Redis) kalau deployment multi-instance jadi kebutuhan nyata — di luar scope P1 saat ini |
+| Circuit breaker HALF_OPEN tidak menegakkan ketat "1 probe" | `is_available()` menghitung `Instant::elapsed()` on-the-fly tanpa mutasi state, jadi beberapa request konkuren yang datang tepat setelah `open_duration` lewat semua bisa lolos sebagai probe, bukan cuma satu seperti spesifikasi §6.3 | Trade-off yang disengaja untuk kesederhanaan; tambahkan flag "probe in-flight" kalau observasi produksi menunjukkan over-probing jadi masalah nyata |
 | README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
-| Automated test masih terbatas (75 unit test — lihat §8) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
+| Automated test masih terbatas (84 unit test — lihat §8) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
 | `cargo clippy` belum pernah dijalankan | Lint issue/anti-pattern berpotensi belum terdeteksi | Jalankan `cargo clippy` sebelum CI dibuat |
 | Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
 | Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
@@ -387,14 +416,15 @@ Milestone berikutnya dapat dianggap selesai jika:
 | Pemeriksaan | Hasil |
 | --- | --- |
 | `cargo build` (lib + bin + `gen_api_key`) | **Lulus** — 0 error, hanya warning kosmetik (`unused variable`, `dead_code` pada fungsi yang memang belum dipakai) |
-| `cargo test` | **Lulus** — 75/75 test passed (5 provider status-mapping + 10 security termasuk `is_operations` + 3 idempotency middleware + 24 `application::payment` termasuk retry, reconcile, dan seleksi provider berbasis priority + 11 DTO mapping termasuk retry response + 9 error mapping handler termasuk MAX_RETRY_REACHED dan PAYMENT_NOT_RECONCILABLE + 8 request validation + 5 `domain::rules`); 0 failed |
+| `cargo test` | **Lulus** — 84/84 test passed (5 provider status-mapping + 9 `circuit_breaker` + 10 security termasuk `is_operations` + 3 idempotency middleware + 24 `application::payment` termasuk retry, reconcile, dan seleksi provider berbasis priority + 11 DTO mapping termasuk retry response + 9 error mapping handler termasuk MAX_RETRY_REACHED dan PAYMENT_NOT_RECONCILABLE + 8 request validation + 5 `domain::rules`); 0 failed |
 | `cargo fmt -- --check` | **Lulus**, tidak ada isu format |
 | `cargo clippy` | Belum dijalankan pada pass ini — masuk backlog P3 |
 | `gen_api_key` tool | Dijalankan manual 2× untuk generate hash yang di-embed di migration seed; output diverifikasi cocok format `key_prefix`/Argon2 PHC yang diharapkan repository |
 | Authentication middleware, idempotency middleware (baca + tulis), migration seed, create/get/search/cancel/retry/reconcile payment, atomic transaction end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini. `PaymentService` (termasuk `PaymentTransactionRepository`), request validation, dan DTO/error-mapping tertest lewat fake repository/provider dan pure function (bukan DB/HTTP sungguhan) |
 | Source scan untuk TODO/stub | Ditemukan pada webhook route, application services (audit/provider/reconciliation-otomatis/webhook), dan test file (`tests/api`, `tests/providers`) — reconcile payment route (§3.4) tidak lagi stub sejak v13.0 |
 | Payment API runtime implementation | Seluruh 6 route payment (`POST /payments`, `GET /payments/{id}`, `GET /payments` search, `POST /payments/{id}/cancel`, `POST /payments/{id}/retry`, `POST /payments/{id}/reconcile`) tersambung ke `PaymentService` (§3.4) — tidak ada lagi handler `NOT_IMPLEMENTED` |
-| Automated test implementation | 75 test: provider (5) + security (10) + idempotency middleware (3) + payment application service (24) + DTO response mapping (11) + handler error-code mapping (9) + request validation (8) + domain rules (5); domain unit test masih parsial (cuma `rules.rs`), API integration/webhook/concurrency test belum ada |
+| Circuit breaker (`CircuitBreakerProvider`) | 9 unit test lulus dengan fake inner provider dan real (bukan mocked) wall-clock time via `tokio::time::sleep` untuk skenario HALF_OPEN — belum pernah diuji dengan provider adapter sungguhan (Midtrans/Xendit/DOKU/NICEPAY) yang benar-benar timeout/gagal berulang di runtime |
+| Automated test implementation | 84 test: provider (5) + circuit breaker (9) + security (10) + idempotency middleware (3) + payment application service (24) + DTO response mapping (11) + handler error-code mapping (9) + request validation (8) + domain rules (5); domain unit test masih parsial (cuma `rules.rs`), API integration/webhook/concurrency test belum ada |
 | Production readiness | Tidak siap |
 
 ## 9. Changelog
@@ -417,3 +447,4 @@ Milestone berikutnya dapat dianggap selesai jika:
 | 13.0 | 18 September 2026 | Implementasi P0 manual reconciliation — **route payment terakhir yang tersambung ke `PaymentService`**. `ReconciliationRecordRow` baru (`domain/repositories.rs`, mapping tabel `reconciliation_records`) dan method baru `PaymentTransactionRepository::reconcile` (atomic: selalu insert record, dan hanya kalau status provider berhasil di-resolve ikut update `payments.status`), diimplementasikan via helper executor-generic baru `insert_reconciliation_record` (`infrastructure/postgres/repositories.rs`, pola sama seperti `insert_payment`/`insert_attempt`/`insert_audit_log`). `ApplicationError::NotReconcilable(PaymentStatus)` baru → `409 PAYMENT_NOT_RECONCILABLE`. `PaymentService::reconcile_payment` pakai `PaymentStatus::needs_reconciliation()` untuk eligibility (bukan `validate_transition`, pola sama seperti retry v12.0) — ambil attempt terakhir, query `PaymentProvider::get_payment_status`, petakan `COMPLETED`/`FAILED`/lainnya ke `Success`/`Failed`/tetap `PENDING_RECONCILIATION` dengan resolution `UNCERTAIN`. Berbeda dari create/retry: error provider saat reconcile TIDAK di-propagate, direkam sebagai `UNCERTAIN` dengan detail error — tujuannya mencatat upaya reconciliation, bukan kehilangan jejaknya. Handler `reconcile_payment` (`api/routes/payment.rs`) cek `MerchantContext::is_operations()` sama seperti retry. DTO: `impl From<ReconciliationOutcome> for ReconcileResponse` baru (struct `ReconcileResponse`/`ReconcileData` sudah ada sebelumnya). Sengaja TIDAK diimplementasikan: insert `payment_attempts` baru untuk query reconciliation, insert `audit_logs` (record itu sendiri jadi audit trail-nya), dan Redis distributed lock `reconcile:{payment_id}` dari architecture doc (`PaymentService` belum punya dependency Redis). Endpoint sudah benar tapi **belum reachable lewat flow lain mana pun** — tidak ada worker yang mentransisikan payment ke `PENDING_RECONCILIATION` (masuk P1). Sekalian memperbaiki baris "Operational payment actions" (§3.8) yang sejak v11.0/v12.0 masih salah menyatakan "Belum" meski cancel dan retry sudah bekerja. 7 unit test baru (73/73 total lulus). Belum ditest terhadap Postgres sungguhan |
 | 14.0 | 18 September 2026 | Implementasi P0 idempotency write-side — menutup gap yang tercatat sejak v6.0 (§5 item #3/#12). `PaymentTransactionRepository::create_with_attempt_and_audit` dapat parameter baru `idempotency: Option<&IdempotencyRow>`; kalau `Some`, `idempotency_keys` ikut di-insert dalam transaksi atomic yang sama dengan payment/attempt/audit. Helper baru `insert_idempotency_row` (executor-generic, `infrastructure/postgres/repositories.rs`) diekstrak dari `PgIdempotencyRepository::save` yang sudah ada, dipakai bersama oleh path non-transactional dan path atomic baru — pola sama seperti `insert_payment`/`insert_attempt`/`insert_audit_log`/`insert_reconciliation_record`. `IdempotencyKey` (request extension, `api/middleware/idempotency.rs`) berubah dari tuple struct 1-field jadi struct `{key, request_hash}` — middleware sudah menghitung SHA-256 hash untuk deteksi duplikat, sekarang diteruskan ke handler alih-alih dibuang. `CreatePaymentInput` dapat field baru `request_hash`. `PaymentService::create_payment` dapat parameter baru `response_snapshot: impl FnOnce(&Payment) -> serde_json::Value` — closure yang disuplai handler HTTP untuk membangun JSON body yang di-cache untuk replay (`idempotency_keys.response_body`), dipanggil dari `Payment` yang sudah lengkap tapi belum di-insert; desain ini (bukan `application` membangun `api::dto::payment::PaymentResponse` sendiri) menjaga layering — `application` tidak boleh depend ke `api`. `response_status_code` di-hardcode `"201"` (satu-satunya status yang `create_payment` kembalikan). `expires_at` di-set eksplisit 24 jam dari Rust, bukan mengandalkan DB `DEFAULT`. Sengaja TIDAK diimplementasikan: `ON CONFLICT` handling untuk idempotency key yang dipakai ulang setelah expired (PK `(idempotency_key, merchant_id)` berpotensi bentrok di edge case sangat sempit — dicatat di §7, bukan diperbaiki). Tidak ada test baru ditambahkan — 1 test yang sudah ada (`create_payment_persists_payment_attempt_and_audit_atomically`) diperluas dengan assertion untuk baris `idempotency_keys` yang di-generate (73/73 total tetap lulus). Belum ditest terhadap Postgres sungguhan |
 | 15.0 | 18 September 2026 | Implementasi P0 terakhir yang masih open: provider selection berbasis prioritas — **dengan ini, seluruh 13 item P0 (§5) Selesai**. `PaymentProvider` trait (`providers/adapter.rs`) dapat method wajib baru `priority() -> i32`, diimplementasikan di keempat adapter (Alpha/Midtrans, Beta/Xendit, Gamma/DOKU, Nicepay) — masing-masing struct dapat field `priority: i32` baru, dialirkan lewat parameter `::new()` tambahan. `Settings` (`config/settings.rs`) dapat 4 field baru (`midtrans_priority`/`xendit_priority`/`doku_priority`/`nicepay_priority`, env var `*_PRIORITY`) dengan default 10/20/30/40 yang menjaga urutan registrasi lama supaya perilaku default tidak berubah. `providers::build_providers` meneruskan nilai-nilai ini ke tiap adapter. Fungsi baru `select_best_provider` (`application/payment.rs`) — di antara provider `is_available()`, pilih `priority()` terkecil (`filter().min_by_key()`) — menggantikan `.find(|p| p.is_available())` yang sebelumnya identik dipakai `create_payment` dan `retry_payment` (implisit berarti "provider pertama di `Vec`"; kini eksplisit dan bisa dikonfigurasi tanpa ubah kode). Sengaja TIDAK termasuk: circuit breaker awareness — `is_available()` masih cuma cek config, bukan runtime health, jadi provider yang sedang gagal berulang tapi terkonfigurasi tetap bisa terpilih; tetap P1 item #4, item terpisah. §3.5 baris "Provider selection by availability/priority" naik dari Parsial ke Selesai; baris "Circuit breaker" tetap Belum (item berbeda). 2 unit test baru: provider priority lebih kecil menang meski didaftarkan belakangan (bukan first-in-Vec), dan provider unavailable di-skip meski priority-nya lebih baik (75/75 total lulus). Belum ditest terhadap environment sungguhan |
+| 16.0 | 18 September 2026 | Implementasi P1 pertama: circuit breaker per provider (§5 P1 item 4), menutup config yang sejak awal proyek ada (`circuit_breaker_threshold`, `circuit_breaker_timeout_seconds`) tapi tidak pernah dipakai runtime mana pun. `CircuitBreakerProvider` baru (`providers/circuit_breaker.rs`) — dekorator generik yang membungkus `Box<dyn PaymentProvider>` mana pun (tidak menyentuh 4 adapter yang ada), state machine CLOSED (normal, hitung kegagalan berturut-turut) / OPEN (>= `failure_threshold` kegagalan → langsung unavailable) / HALF_OPEN (setelah `open_duration` lewat, izinkan probe — sukses reset ke CLOSED, gagal kembali ke OPEN), sesuai §6.3 architecture doc. Direpresentasikan sebagai 2 variant internal (`Closed`/`Open`), bukan 3 — HALF_OPEN dihitung on-the-fly dari `Instant::elapsed()` di `is_available()` tanpa mutasi state, simplifikasi yang disengaja (spesifikasi "izinkan tepat 1 probe" butuh flag "probe in-flight" tambahan yang tidak diimplementasikan; beberapa request konkuren yang datang tepat setelah durasi lewat semua bisa lolos sebagai probe). State in-memory per-proses (bukan Redis/DB) — deployment multi-instance butuh koordinasi state bersama, di luar scope. `providers::build_providers` membungkus keempat adapter dengan ini via closure `with_circuit_breaker`, sehingga `PaymentService::select_best_provider` (v15.0) otomatis circuit-breaker-aware tanpa perubahan apa pun di `application/payment.rs` — dekorator transparan di belakang trait `PaymentProvider` yang sama. §3.5 baris "Circuit breaker" naik dari Belum ke Selesai. 9 unit test baru untuk `CircuitBreakerProvider`, sebagian pakai `tokio::time::sleep` dengan durasi pendek (bukan mocked clock — fitur `test-util` tokio tidak diaktifkan) untuk menguji transisi HALF_OPEN (84/84 total lulus). Belum diuji terhadap provider adapter sungguhan yang benar-benar timeout/gagal berulang |

@@ -50,10 +50,14 @@ pub trait PaymentProvider: Send + Sync {
     /// Nama provider (digunakan untuk routing dan logging).
     fn name(&self) -> &str;
 
-    /// Apakah provider saat ini tersedia. Saat ini hanya cek konfigurasi
-    /// (mis. Server Key kosong) — BUKAN circuit breaker sungguhan (tidak
-    /// ada state CLOSED/OPEN/HALF_OPEN yang melacak kegagalan runtime).
-    /// Circuit breaker per provider masih P1 (lihat Progress-Report.md §5).
+    /// Apakah provider saat ini tersedia. Setiap adapter (Alpha/Beta/Gamma/
+    /// Nicepay) sendiri hanya cek konfigurasi (mis. Server Key kosong) —
+    /// TIDAK tahu apa pun soal circuit breaker. `providers::build_providers`
+    /// membungkus tiap adapter dengan `circuit_breaker::CircuitBreakerProvider`
+    /// (dekorator, lihat file itu), yang menggabungkan cek konfigurasi ini
+    /// DENGAN state CLOSED/OPEN/HALF_OPEN — jadi provider yang dipakai
+    /// `PaymentService` (`select_best_provider`) sudah circuit-breaker-aware,
+    /// walau trait method ini sendiri, dilihat dari adapter mentah, belum.
     fn is_available(&self) -> bool;
 
     /// Prioritas seleksi di antara provider yang `is_available()` — nilai
