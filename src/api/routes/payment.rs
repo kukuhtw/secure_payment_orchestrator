@@ -115,6 +115,11 @@ fn map_application_error(err: ApplicationError) -> ApiError {
             "MAX_RETRY_REACHED",
             format!("Maximum retry attempts ({max}) already reached for this payment"),
         ),
+        ApplicationError::NotReconcilable(status) => ApiError::new(
+            StatusCode::CONFLICT,
+            "PAYMENT_NOT_RECONCILABLE",
+            format!("Payment is not eligible for reconciliation (current status: {status})"),
+        ),
     }
 }
 
@@ -214,11 +219,29 @@ async fn retry_payment(
 
 async fn reconcile_payment(
     State(state): State<SharedState>,
+    Extension(merchant): Extension<MerchantContext>,
     Path(payment_id): Path<String>,
 ) -> Result<Json<ReconcileResponse>, ApiError> {
-    // TODO: Implement reconciliation
     tracing::info!("Reconcile payment: {}", payment_id);
-    Err(ApiError::not_implemented("reconcile_payment"))
+
+    if !merchant.is_operations() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "AUTHORIZATION_FAILED",
+            "This endpoint requires an operations API key",
+        ));
+    }
+
+    let payment_id = Uuid::parse_str(&payment_id)
+        .map_err(|_| ApiError::bad_request("Invalid payment_id format"))?;
+
+    let outcome = state
+        .payment_service
+        .reconcile_payment(payment_id)
+        .await
+        .map_err(|err| map_payment_lookup_error(err, payment_id))?;
+
+    Ok(Json(outcome.into()))
 }
 
 #[cfg(test)]
@@ -305,5 +328,14 @@ mod tests {
 
         assert_eq!(api_err.status_code, StatusCode::BAD_REQUEST);
         assert_eq!(api_err.error.code, "MAX_RETRY_REACHED");
+    }
+
+    #[test]
+    fn maps_not_reconcilable_to_409() {
+        let err = ApplicationError::NotReconcilable(crate::domain::status::PaymentStatus::Pending);
+        let api_err = map_application_error(err);
+
+        assert_eq!(api_err.status_code, StatusCode::CONFLICT);
+        assert_eq!(api_err.error.code, "PAYMENT_NOT_RECONCILABLE");
     }
 }

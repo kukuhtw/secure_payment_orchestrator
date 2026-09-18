@@ -4,11 +4,11 @@
 
 | Informasi | Nilai |
 | --- | --- |
-| Versi report | 12.0 |
+| Versi report | 13.0 |
 | Tanggal audit | 18 September 2026 |
 | Status produk | Proof of Concept, belum production-ready |
 | Dasar penilaian | `cargo build`, `cargo test`, `cargo fmt -- --check` (registry Cargo dapat diakses), ditambah pemeriksaan source code, migration, konfigurasi, dan dokumentasi |
-| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (66/66 test lulus), `cargo fmt -- --check` lulus tanpa isu |
+| Verifikasi build | **Lulus.** `cargo build` sukses (lib + bin + `gen_api_key`), `cargo test` sukses (73/73 test lulus), `cargo fmt -- --check` lulus tanpa isu |
 
 ## 1. Ringkasan Eksekutif
 
@@ -18,66 +18,74 @@ PostgreSQL repositories, Redis lock helper, kontrak provider, empat provider ada
 container setup, authentication middleware, idempotency middleware, payment application
 service, `POST /payments`/`GET /payments/{id}` (v8.0), request validation (v9.0), atomic
 transaction untuk `create_payment` (v10.0), `GET /payments` (search) dan
-`POST /payments/{id}/cancel` (v11.0), dan — baru pada pass ini —
-**`POST /payments/{id}/retry`** yang benar-benar berfungsi. Dengan ini, **seluruh 6
-route payment di `src/api/routes/payment.rs` sudah tersambung ke `PaymentService`**
-kecuali reconcile.
+`POST /payments/{id}/cancel` (v11.0), `POST /payments/{id}/retry` (v12.0), dan — baru
+pada pass ini — **`POST /payments/{id}/reconcile`** yang benar-benar berfungsi. Dengan
+ini, **seluruh 6 route payment di `src/api/routes/payment.rs` sudah tersambung ke
+`PaymentService`** — tidak ada lagi handler `NOT_IMPLEMENTED`.
 
-Pass v12.0 mengimplementasikan manual retry, endpoint operations-only per API contract
-§3.5 ("Melakukan retry manual untuk pembayaran yang gagal. Hanya untuk Operations."):
+Pass v13.0 mengimplementasikan manual reconciliation, endpoint operations-only per API
+contract dan architecture doc §3.3 ("Query status ke provider untuk payment uncertain"):
 
-- **Authorization operations-only, untuk pertama kalinya diterapkan.** Menambahkan
-  `MerchantContext::is_operations()` (true untuk `permissions == "operations"` atau
-  `"admin"`) di `security/api_key.rs`. Handler `retry_payment` mengecek ini duluan dan
-  balas `403 AUTHORIZATION_FAILED` kalau bukan operations key — item yang sejak v7.0
-  dicatat sebagai gap ("otorisasi granular per-permission belum diterapkan") sekarang
-  punya implementasi nyata untuk endpoint pertamanya.
-- **Lookup merchant-unscoped.** Method baru `PaymentRepository::get_by_id_unscoped` —
-  operations bertindak lintas merchant, bukan cuma merchant pemilik API key (yang di
-  seed data justru merchant "Operations" terpisah, bukan merchant pemilik payment).
-  `get_by_id` (merchant-scoped) yang lama tetap dipakai untuk endpoint self-service
-  (get/cancel).
-- **Retry eligibility BUKAN lewat `validate_transition`.** State machine yang direfactor
-  di v11.0 menganggap `FAILED` sebagai final (`is_final()` mencakup `FAILED`), jadi
-  `validate_transition(Failed, Processing)` akan selalu ditolak sebagai `AlreadyFinal` —
-  padahal `PaymentStatus::is_retryable()` (sudah ada sejak awal, mencakup `FAILED` dan
-  `PENDING_RETRY`) justru bilang `FAILED` boleh di-retry, dan teks kontrak eksplisit
-  bilang "pembayaran yang gagal". `retry_payment` sengaja pakai `is_retryable()`
-  langsung, bukan `validate_transition`, dan set status ke `Processing` secara manual.
-  `validate_transition` sendiri **tidak diubah** — perbaikan itu di luar scope pass ini.
-- **Dibatasi `MAX_RETRY_ATTEMPTS` (5) yang sekarang benar-benar ditegakkan** —
-  sebelumnya konstanta ini ada di `domain::rules` tapi tidak dipakai di mana pun.
-  Melebihi batas → `400 MAX_RETRY_REACHED` (kode error persis sesuai kontrak).
-- **Atomic, memakai transaksi yang diperluas.** `PaymentTransactionRepository` dapat
-  method baru `update_status_with_attempt_and_audit` (update status + insert attempt +
-  insert audit log, satu `sqlx::Transaction`) — `PgPaymentRepository::update_status` juga
-  direfactor supaya bisa ikut memperbarui kolom `provider` (perlu untuk retry yang
-  memilih provider berbeda; sebelumnya kolom itu tidak pernah di-update lewat jalur ini).
-- **Sengaja TIDAK diimplementasikan:** seleksi provider failover-aware (masih naif
-  "first available", sama seperti create); kalau panggilan provider saat retry gagal,
-  tidak ada apa pun yang disimpan (sama seperti create) — jadi retry yang gagal karena
-  provider TIDAK menambah hitungan `MAX_RETRY_ATTEMPTS`.
+- **Eligibility ketat lewat `PaymentStatus::needs_reconciliation()`.** Sama seperti
+  pelajaran dari retry (v12.0): route lewat `validate_transition` akan salah, jadi
+  `reconcile_payment` langsung memakai helper domain yang sempit (`needs_reconciliation()`
+  → status harus persis `PENDING_RECONCILIATION`) alih-alih `validate_transition`. Selain
+  konsisten, ini juga jujur soal limitasi: **belum ada apa pun di codebase ini yang
+  mentransisikan payment KE status itu** (tidak ada worker timeout/retry-exhaustion) —
+  jadi endpoint ini sudah benar secara implementasi tapi belum bisa dipicu lewat flow
+  lain mana pun. Dicatat sebagai gap yang disengaja, bukan bug.
+- **Query provider, bukan re-create.** `reconcile_payment` ambil attempt terakhir
+  (`AttemptRepository::get_by_payment_id`, diambil yang `attempt_number` terbesar),
+  lalu panggil `PaymentProvider::get_payment_status(provider_payment_id)` ke provider
+  yang sama dipakai attempt itu. Hasil dipetakan: `COMPLETED`→`Success`,
+  `FAILED`→`Failed`, selain itu (termasuk `PENDING`)→tetap `PENDING_RECONCILIATION`
+  dengan resolution `UNCERTAIN`.
+- **Provider error TIDAK propagate seperti create/retry.** Berbeda dari
+  `create_payment`/`retry_payment` (yang meneruskan error provider ke caller dan tidak
+  menyimpan apa pun), kegagalan provider saat reconcile direkam sebagai resolution
+  `UNCERTAIN` dengan detail error di `reconciliation_records.details` — tujuan
+  reconciliation adalah mencatat apa yang berhasil dipelajari (atau bahwa tidak ada
+  yang berhasil dipelajari), bukan kehilangan jejak bahwa upaya sudah dilakukan.
+- **Atomic, tabel baru `reconciliation_records`.** Method baru
+  `PaymentTransactionRepository::reconcile` (satu `sqlx::Transaction`) selalu insert
+  baris `reconciliation_records`, dan — hanya kalau status provider berhasil di-resolve
+  (`Some`) — ikut update `payments.status` dalam transaksi yang sama. Kalau masih
+  `UNCERTAIN`, hanya record yang tersimpan, payment tetap `PENDING_RECONCILIATION`.
+- **Sengaja TIDAK diimplementasikan:** insert baris `payment_attempts` baru untuk query
+  reconciliation (ini query status, bukan payment attempt baru, meski
+  `AttemptType::Reconciliation` sudah ada di domain model — dicatat sebagai keputusan
+  scope, worth ditinjau ulang kalau kontrak sebenarnya butuh jejak attempt terpisah);
+  insert `audit_logs` untuk reconcile (`reconciliation_records` sendiri berfungsi
+  sebagai audit trail yang lebih tepat untuk aksi ini); dan Redis distributed lock
+  `reconcile:{payment_id}` yang disebut architecture doc (`PaymentService` belum punya
+  dependency Redis sama sekali — menambahkannya hanya untuk endpoint ini adalah
+  perubahan struktural yang lebih besar dari yang dibutuhkan pass ini).
 
-7 unit test baru untuk `retry_payment` (happy path, status tidak retryable, max attempt
-tercapai, provider tidak tersedia, not-found) + response mapping + error-code mapping,
-ditambah 2 test untuk `MerchantContext::is_operations()`.
+7 unit test baru untuk `reconcile_payment` (resolve ke Success, resolve ke Failed, tetap
+UNCERTAIN saat provider PENDING, tetap UNCERTAIN saat provider error tanpa propagate,
+status tidak reconcilable, not-found) ditambah 1 test untuk error-code mapping
+(`NotReconcilable` → `409 PAYMENT_NOT_RECONCILABLE`).
 
 | Status | Jumlah task | Persentase |
 | --- | ---: | ---: |
-| Selesai | 31 | 52% |
+| Selesai | 33 | 55% |
 | Parsial | 14 | 23% |
-| Belum | 15 | 25% |
+| Belum | 13 | 22% |
 | **Total** | **60** | **100%** |
 
-Dibanding v11.0 (30 selesai / 14 parsial / 16 belum), satu task naik dari Belum ke
-Selesai: Manual retry endpoint. Tidak ada task yang turun status.
+Dibanding v12.0 (31 selesai / 14 parsial / 15 belum), dua task naik dari Belum ke
+Selesai: Reconciliation endpoint (v13.0, item baru pass ini) dan Operational payment
+actions di §3.8 (koreksi retroaktif — baris ini masih menyatakan "Belum" di v12.0
+meski cancel dan retry sudah berfungsi sejak v11.0/v12.0; sekarang dengan reconcile
+juga selesai, ketiganya benar-benar bekerja jadi baris ini diperbaiki). Tidak ada task
+yang turun status.
 
 Persentase di atas adalah hitungan task pada report ini, bukan estimasi LOC atau klaim
-kesiapan production. Retry **belum ditest terhadap Postgres sungguhan** (tidak ada
-Docker di environment ini) — sama seperti create/get/search/cancel. Reconcile masih
-`NOT_IMPLEMENTED` (satu-satunya route payment yang tersisa), dan idempotency middleware
-masih belum bisa menyimpan response untuk replay (gap dari v6.0/v10.0, tidak tersentuh
-pass ini).
+kesiapan production. Reconcile **belum ditest terhadap Postgres sungguhan** (tidak ada
+Docker di environment ini) — sama seperti create/get/search/cancel/retry — dan belum
+bisa dipicu lewat flow lain mana pun (lihat poin eligibility di atas). Idempotency
+middleware masih belum bisa menyimpan response untuk replay (gap dari v6.0/v10.0, tidak
+tersentuh pass ini).
 
 ## 2. Definisi Status
 
@@ -118,12 +126,12 @@ pass ini).
 | Payment aggregate dan Money | Selesai | `src/domain/payment.rs` — entity, validasi, transition wrapper |
 | Payment status/state machine | Selesai | `src/domain/status.rs`, `src/domain/rules.rs` — enum dan transition matrix lengkap. Sejak v11.0, `validate_transition` menolak payment yang sudah final dengan `DomainError::AlreadyFinal` (bukan `InvalidTransition` generik) — dipakai `cancel_payment` untuk `422 PAYMENT_ALREADY_FINAL` yang presisi. 5 unit test baru (lihat §3.9) |
 | Retry classification/backoff rules | Selesai | `is_retryable_http_status`, `is_retryable_error`, `retry_delay_seconds` di `src/domain/rules.rs` |
-| Repository contracts | Selesai | 7 trait (payment, `PaymentTransactionRepository` baru v10.0, attempt, API key, idempotency, audit, webhook) di `src/domain/repositories.rs` |
-| PostgreSQL repository implementation | Selesai | Diperbaiki: `PaymentAttemptRow` ditambahkan ke import di `repositories.rs`, dan `domain/attempt.rs` memakai `row.status.as_str()` / `row.attempt_type.as_str()` (bukan `&row.status`) agar cocok dengan `impl From<&str>`. Query CRUD/search/count untuk semua 6 repository lengkap dan compile bersih. Sejak v10.0, INSERT payment/attempt/audit diekstrak jadi fungsi executor-generic (`insert_payment`/`insert_attempt`/`insert_audit_log`) dipakai bersama oleh repo biasa (`&PgPool`) dan `PgPaymentTransactionRepository` (`&mut *tx`). Sejak v11.0, query `search` (SELECT dan COUNT) memfilter `created_at` berdasar `from_date`/`to_date` — sebelumnya kedua field itu ada di `SearchCriteria` tapi diam-diam diabaikan di SQL |
+| Repository contracts | Selesai | 7 trait (payment, `PaymentTransactionRepository` baru v10.0, attempt, API key, idempotency, audit, webhook) di `src/domain/repositories.rs`. Sejak v13.0, `PaymentTransactionRepository` dapat method baru `reconcile`, dan struct baru `ReconciliationRecordRow` (mapping tabel `reconciliation_records`) |
+| PostgreSQL repository implementation | Selesai | Diperbaiki: `PaymentAttemptRow` ditambahkan ke import di `repositories.rs`, dan `domain/attempt.rs` memakai `row.status.as_str()` / `row.attempt_type.as_str()` (bukan `&row.status`) agar cocok dengan `impl From<&str>`. Query CRUD/search/count untuk semua 6 repository lengkap dan compile bersih. Sejak v10.0, INSERT payment/attempt/audit diekstrak jadi fungsi executor-generic (`insert_payment`/`insert_attempt`/`insert_audit_log`) dipakai bersama oleh repo biasa (`&PgPool`) dan `PgPaymentTransactionRepository` (`&mut *tx`). Sejak v11.0, query `search` (SELECT dan COUNT) memfilter `created_at` berdasar `from_date`/`to_date` — sebelumnya kedua field itu ada di `SearchCriteria` tapi diam-diam diabaikan di SQL. Sejak v13.0, `insert_reconciliation_record` (executor-generic, pola sama seperti helper insert_* lain) dipakai `PgPaymentTransactionRepository::reconcile` untuk insert `reconciliation_records` dan, kalau status ter-resolve, update `payments.status` — satu transaksi |
 | Atomic business transaction | Selesai (naik dari Parsial) | `PgPaymentTransactionRepository::create_with_attempt_and_audit` memakai `pool.begin()`/`tx.commit()` sungguhan — payment, attempt awal, dan audit log tersimpan dalam satu transaksi. `idempotency_keys` **belum** ikut transaksi ini (butuh request hash dari middleware + response body dari handler, tidak tersedia di `PaymentService`) — lihat §1 dan §7. **Belum ditest terhadap Postgres sungguhan** |
 | Concurrency protection | Parsial | Redis lock helper (§3.6) kini dipakai nyata oleh idempotency middleware (§3.4) untuk mencegah request konkuren dengan `Idempotency-Key` sama diproses bersamaan; belum dipakai oleh webhook/reconciliation flow — `application/*.rs` masih skeleton satu baris |
 
-### 3.4 Core Payment API — 8 selesai, 0 parsial, 0 belum
+### 3.4 Core Payment API — 9 selesai, 0 parsial, 0 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
@@ -135,6 +143,7 @@ pass ini).
 | Search payment | Selesai (naik dari Belum) | `search_payments` memanggil `PaymentService::search_payments` (wrapper atas `PaymentRepository::search`). Ditemukan+diperbaiki sekalian: SQL `search` sebelumnya menerima `from_date`/`to_date` di `SearchCriteria` tapi **tidak pernah memfilternya** — sekarang query SELECT dan COUNT keduanya memfilter `created_at` dengan benar (lihat §3.3). **Belum ditest terhadap Postgres sungguhan** |
 | Cancel payment | Selesai (naik dari Belum) | `cancel_payment` memanggil `PaymentService::cancel_payment` (fetch → `transition_to(Cancelled)` → `update_status` → audit log best-effort), balas `200 OK` dengan `CancelPaymentResponse` baru (`{payment_id, status, cancelled_at}`, bentuk lebih ringkas sesuai API contract §3.4) atau `404`/`422 PAYMENT_ALREADY_FINAL`. **Belum ditest terhadap Postgres sungguhan** |
 | Manual retry endpoint | Selesai (naik dari Belum) | `src/api/routes/payment.rs::retry_payment` — cek `MerchantContext::is_operations()` (403 kalau bukan), panggil `PaymentService::retry_payment`, balas `200 OK` dengan `RetryPaymentResponse` (`{payment_id, status, attempt_number, provider, message}` sesuai API contract §3.5). Eligibility pakai `PaymentStatus::is_retryable()`, dibatasi `MAX_RETRY_ATTEMPTS`, atomic via `update_status_with_attempt_and_audit`. Seleksi provider masih naif (sama seperti create). **Belum ditest terhadap Postgres sungguhan** |
+| Reconcile payment endpoint | Selesai (naik dari Belum) | `src/api/routes/payment.rs::reconcile_payment` — cek `MerchantContext::is_operations()` (403 kalau bukan), panggil `PaymentService::reconcile_payment`, balas `200 OK` dengan `ReconcileResponse` (`{payment_id, previous_status, current_status, provider_status, resolution, reconciled_at}`). Eligibility pakai `PaymentStatus::needs_reconciliation()` (status harus `PENDING_RECONCILIATION`), query provider dari attempt terakhir, atomic via `PaymentTransactionRepository::reconcile` (lihat §3.3, §3.6). **Belum ditest terhadap Postgres sungguhan, dan belum bisa dipicu lewat flow lain mana pun** (tidak ada worker yang mentransisikan payment ke `PENDING_RECONCILIATION` — lihat §3.6, §7) |
 
 ### 3.5 Provider integration dan fallback — 2 selesai, 4 parsial, 3 belum
 
@@ -150,15 +159,14 @@ pass ini).
 | Circuit breaker | Belum | Hanya config (`circuit_breaker_threshold`, `circuit_breaker_timeout_seconds` di `settings.rs`); tidak ada state machine/runtime |
 | Automatic fallback A ke B | Belum | Belum ada routing, safe-failure decision, atau failover execution |
 
-### 3.6 Reliability dan reconciliation — 1 selesai, 1 parsial, 4 belum
+### 3.6 Reliability dan reconciliation — 1 selesai, 1 parsial, 3 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Redis distributed lock helper | Selesai | Diperbaiki: `release_lock` di `src/infrastructure/redis/lock.rs` sebelumnya gagal compile karena never-type-fallback ambiguity pada `invoke_async(...).await?`; fix dengan anotasi eksplisit `let _: () = script...invoke_async(redis).await?;`. Logic acquire (`SET NX EX`) dan release (ownership-check Lua) sudah benar secara desain dan sekarang compile bersih |
 | Retry rules | Parsial | Klasifikasi dan backoff tersedia di domain layer. `MAX_RETRY_ATTEMPTS` sekarang benar-benar ditegakkan oleh `PaymentService::retry_payment` (v12.0, manual/synchronous) — sebelumnya konstanta ini tidak dipakai di mana pun. `retry_delay_seconds` (exponential backoff) masih belum dipakai — itu untuk worker otomatis (P1) yang belum ada |
 | Retry worker dan max-attempt execution | Belum | Belum ada worker implementation |
-| Reconciliation service | Belum | `src/application/reconciliation.rs` hanya doc comment satu baris |
-| Reconciliation endpoint | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
+| Reconciliation service (otomatis/worker) | Belum | `src/application/reconciliation.rs` masih hanya doc comment satu baris — tidak ada worker/trigger otomatis yang mendeteksi payment uncertain dan mentransisikannya ke `PENDING_RECONCILIATION`. Manual reconciliation lewat HTTP endpoint sudah selesai (lihat §3.4 "Reconcile payment endpoint") dan logic-nya ada langsung di `PaymentService::reconcile_payment` (`application/payment.rs`, pola sama seperti cancel/retry) — tapi karena tidak ada apa pun yang men-set status `PENDING_RECONCILIATION`, endpoint manual itu belum reachable lewat flow lain mana pun |
 | Late-webhook conflict handling | Belum | Belum ada processing implementation |
 
 ### 3.7 Security dan webhook — 1 selesai, 2 parsial, 3 belum
@@ -167,19 +175,19 @@ pass ini).
 | --- | --- | --- |
 | Security algorithm/design | Parsial | Bagian API key (Argon2 + constant-time) sudah diimplementasikan; bagian HMAC-SHA256 webhook (`security/webhook_sig.rs`) masih doc comment intent saja |
 | API-key hashing dan verification | Selesai | `src/security/hash.rs::hash_secret`/`verify_secret` (Argon2id, `PasswordVerifier` yang inheren constant-time) dan `src/security/api_key.rs::parse_bearer_token`/`key_prefix`; 8 unit test lulus (roundtrip, wrong-secret, malformed hash, bearer parsing, key prefix) |
-| Merchant authentication/authorization | Parsial | Merchant diidentifikasi dan discoping via `MerchantContext` setelah API key tervalidasi. Sejak v12.0, otorisasi granular per-permission **sudah ada implementasinya**: `MerchantContext::is_operations()` (`operations`/`admin`) dicek di `retry_payment` → `403 AUTHORIZATION_FAILED` kalau bukan operations key. Baru satu endpoint yang pakai — reconcile (operations-only juga, per pola yang sama) masih `NOT_IMPLEMENTED`, dan belum ada pengecekan permission generik yang dipakai bersama di semua route operations |
+| Merchant authentication/authorization | Parsial | Merchant diidentifikasi dan discoping via `MerchantContext` setelah API key tervalidasi. Sejak v12.0, otorisasi granular per-permission **sudah ada implementasinya**: `MerchantContext::is_operations()` (`operations`/`admin`) dicek di `retry_payment`, dan sejak v13.0 juga di `reconcile_payment` → `403 AUTHORIZATION_FAILED` kalau bukan operations key. Dua endpoint sudah pakai pengecekan ini, tapi masing-masing masih inline di handler-nya sendiri — belum ada pengecekan permission generik (mis. middleware/extractor) yang dipakai bersama di semua route operations |
 | Webhook signature verification | Belum | `src/security/webhook_sig.rs` hanya doc comment |
 | Webhook replay/duplicate processing | Belum | DB unique constraint tersedia (`uq_webhook_events_provider_event`), tetapi service belum ada |
 | Webhook route processing | Belum | Handler mengembalikan `NOT_IMPLEMENTED` |
 
-### 3.8 Observability dan operations — 1 selesai, 2 parsial, 1 belum
+### 3.8 Observability dan operations — 2 selesai, 2 parsial, 0 belum
 
 | Task | Status | Bukti / catatan |
 | --- | --- | --- |
 | Logging initialization | Selesai | Diimplementasikan: `src/observability/logging.rs::init()` sekarang membangun `tracing_subscriber` dengan format JSON dan `EnvFilter` dari `settings.log_level` (sebelumnya file ini hanya doc comment tanpa fungsi apa pun, menyebabkan `main.rs` gagal compile) |
 | Request/correlation ID | Parsial | Diperbaiki hanya path pemanggilan: `api/mod.rs` sekarang memanggil `middleware::request_id_layer()` yang benar-benar ada (bukan `middleware::request_id::request_id_layer()` yang tidak ada), tetap berupa `Identity` pass-through — belum ada generate/propagate `X-Request-ID` sungguhan |
 | Prometheus instrumentation/export | Parsial (naik dari Belum) | Diimplementasikan: `src/observability/metrics.rs::init()` memasang `PrometheusBuilder` recorder global, dan `GET /metrics` (`api/routes/metrics.rs`) merender snapshot asli via `render()`. Belum ada metric (`spo_payments_total`, `spo_payment_duration_ms`) yang benar-benar direkam karena application layer belum memanggilnya — endpoint akan menampilkan output kosong sampai instrumentasi ditambahkan di P1/P2 |
-| Operational payment actions | Belum | Cancel, retry, dan reconcile belum bekerja |
+| Operational payment actions | Selesai (koreksi retroaktif) | Cancel (v11.0), retry (v12.0), dan reconcile (v13.0) semuanya sudah bekerja lewat `PaymentService` (lihat §3.4) — baris ini masih salah menyatakan "Belum" di report v11.0/v12.0 meski cancel dan retry sudah selesai saat itu; diperbaiki sekarang saat reconcile melengkapi ketiganya |
 
 ### 3.9 Quality assurance dan delivery — 2 selesai, 2 parsial, 4 belum
 
@@ -189,7 +197,7 @@ pass ini).
 | OpenAPI specification | Selesai | `documentation/api/openapi.yaml` |
 | Domain unit tests | Parsial (naik dari Belum) | `src/domain/rules.rs` sekarang punya 5 unit test (`validate_transition`: transisi valid, non-final→Cancelled, final→AlreadyFinal untuk ketiga status final, transisi terlarang→InvalidTransition). `payment.rs`, `status.rs`, `attempt.rs`, `error.rs` masih belum punya test langsung — `Payment::try_from(PaymentRow)` cuma tercakup tidak langsung lewat test `application::payment` |
 | API integration tests | Belum | `tests/api/mod.rs` masih TODO |
-| Provider tests | Parsial | 5 unit test di provider layer (Midtrans/Xendit/DOKU/NICEPAY status mapping) — semuanya **lulus** via `cargo test`; `tests/providers/mod.rs` (integration) masih TODO. Di luar provider, ada 61 unit test lain (10 security termasuk `is_operations`, 3 idempotency middleware, 16 `application::payment` termasuk retry, 11 DTO mapping termasuk retry response, 8 error mapping handler termasuk MAX_RETRY_REACHED, 8 request validation, 5 `domain::rules`) — total 66/66 lulus |
+| Provider tests | Parsial | 5 unit test di provider layer (Midtrans/Xendit/DOKU/NICEPAY status mapping) — semuanya **lulus** via `cargo test`; `tests/providers/mod.rs` (integration) masih TODO. Di luar provider, ada 68 unit test lain (10 security termasuk `is_operations`, 3 idempotency middleware, 22 `application::payment` termasuk retry dan reconcile, 11 DTO mapping termasuk retry response, 9 error mapping handler termasuk MAX_RETRY_REACHED dan PAYMENT_NOT_RECONCILABLE, 8 request validation, 5 `domain::rules`) — total 73/73 lulus |
 | CI/CD workflow | Belum | Folder `.github/` tidak ditemukan di repository |
 | Postman collection | Belum | File tidak tersedia |
 | Demo/end-to-end script | Belum | File tidak tersedia |
@@ -209,7 +217,7 @@ pass ini).
 11. PostgreSQL pool creation dan Redis client setup (path/naming bug diperbaiki).
 12. Redis distributed lock helper (compile bug diperbaiki).
 13. Structured JSON logging initialization.
-14. `spo-api` compile bersih: `cargo build`, `cargo test` (66/66 lulus), dan `cargo fmt -- --check` semuanya lulus.
+14. `spo-api` compile bersih: `cargo build`, `cargo test` (73/73 lulus), dan `cargo fmt -- --check` semuanya lulus.
 15. Authentication middleware — Argon2 API-key verification, merchant context, dipasang hanya pada payment routes (belum ditest end-to-end, lihat §3.4 dan §7).
 16. Idempotency middleware (sisi baca) — duplicate/conflict detection dan Redis lock concurrency guard, sekarang juga membatasi panjang `Idempotency-Key` (≤255 karakter).
 17. `src/bin/gen_api_key.rs` — tool generate/hash API key, dipakai untuk membuat 2 seed key di migration `20260917_002_seed_demo_api_keys.sql` (cocok contoh `sk_live_demo_key_001`/`sk_live_ops_key_001` di README.md).
@@ -219,7 +227,8 @@ pass ini).
 21. Atomic transaction untuk `create_payment` — `PgPaymentTransactionRepository` membungkus insert payment + attempt + audit log dalam satu `sqlx::Transaction` (lihat §3.3). Belum ditest terhadap Postgres sungguhan.
 22. `GET /payments` (search) dan `POST /payments/{id}/cancel` tersambung ke `PaymentService` — bukan lagi `NOT_IMPLEMENTED` (lihat §3.4). Termasuk perbaikan bug lama: filter `from_date`/`to_date` di search sekarang benar-benar dipakai SQL. Belum ditest terhadap Postgres sungguhan.
 23. `domain::rules::validate_transition` — payment final ditolak dengan `DomainError::AlreadyFinal` (bukan `InvalidTransition` generik), sekarang punya 5 unit test (sebelumnya nihil).
-24. `POST /payments/{id}/retry` tersambung ke `PaymentService::retry_payment` — bukan lagi `NOT_IMPLEMENTED` (lihat §3.4). Seluruh route payment kini tersambung kecuali reconcile. Termasuk implementasi pertama authorization operations-only (`MerchantContext::is_operations()`, §3.7) dan `MAX_RETRY_ATTEMPTS` yang benar-benar ditegakkan (§3.6). Belum ditest terhadap Postgres sungguhan.
+24. `POST /payments/{id}/retry` tersambung ke `PaymentService::retry_payment` — bukan lagi `NOT_IMPLEMENTED` (lihat §3.4). Termasuk implementasi pertama authorization operations-only (`MerchantContext::is_operations()`, §3.7) dan `MAX_RETRY_ATTEMPTS` yang benar-benar ditegakkan (§3.6). Belum ditest terhadap Postgres sungguhan.
+25. `POST /payments/{id}/reconcile` tersambung ke `PaymentService::reconcile_payment` — bukan lagi `NOT_IMPLEMENTED` (lihat §3.4). **Seluruh 6 route payment kini tersambung ke `PaymentService`, tidak ada lagi handler `NOT_IMPLEMENTED`.** Operations-only (`403` kalau bukan), eligibility via `PaymentStatus::needs_reconciliation()`, atomic via `PaymentTransactionRepository::reconcile` (tabel baru `reconciliation_records`, §3.3). Provider error direkam sebagai `UNCERTAIN` alih-alih di-propagate. Belum ditest terhadap Postgres sungguhan, dan belum reachable lewat flow lain mana pun karena belum ada worker yang men-set status `PENDING_RECONCILIATION` (§3.6, §7).
 
 ## 5. Daftar yang Belum Selesai
 
@@ -235,23 +244,23 @@ tidak bisa dikompilasi.
 3. ~~Idempotency flow dengan Redis lock dan DB constraint.~~ **Sisi baca selesai pada v6.0** (duplicate/conflict detection, concurrency lock) — lihat §3.4. Sisi tulis (persist `IdempotencyRow`) **masih terbuka** meski atomic transaction (item #11) sudah selesai — `PaymentService` belum punya akses ke request hash (di middleware) dan response body (di handler) yang dibutuhkan untuk mengisi baris itu.
 4. ~~Seed/tooling untuk membuat API key.~~ **Selesai pada v7.0** — `src/bin/gen_api_key.rs` + migration `20260917_002_seed_demo_api_keys.sql`. Belum dijalankan terhadap Postgres sungguhan (tidak ada Docker di environment ini).
 5. ~~Request validation.~~ **Selesai** untuk `CreatePaymentRequest` (v9.0), `CancelPaymentRequest`, dan `SearchPaymentParams` (v11.0) — lihat §3.4.
-6. ~~Payment application service.~~ **Selesai** — `PaymentService::create_payment`/`get_payment` (v7.0), `search_payments`/`cancel_payment` (v11.0), `retry_payment` (v12.0) lengkap+tertest (lihat §3.4, §3.9); hanya `reconcile` yang masih belum punya method service (lihat item #10).
+6. ~~Payment application service.~~ **Selesai** — `PaymentService::create_payment`/`get_payment` (v7.0), `search_payments`/`cancel_payment` (v11.0), `retry_payment` (v12.0), `reconcile_payment` (v13.0) lengkap+tertest (lihat §3.4, §3.9).
 7. Provider selection dan invocation. **Seleksi naif ("first available") sudah ada** di dalam `PaymentService::create_payment` (v7.0) dan `retry_payment` (v12.0) (lihat §3.5) — seleksi berbasis prioritas/circuit breaker sungguhan masih belum.
 8. ~~Create dan Get payment handlers.~~ **Selesai pada v8.0** — `src/api/routes/payment.rs::create_payment`/`get_payment` tersambung ke `PaymentService` (lihat §3.4). Belum ditest terhadap Postgres/Redis sungguhan.
 9. ~~Search dan Cancel payment handlers.~~ **Selesai pada v11.0** (lihat §3.4). Catatan: `cancel_payment` cuma mengubah status lokal, **tidak** memberi tahu provider (mis. void transaksi di gateway) — sesuai bentuk response yang didokumentasikan API contract §3.4 (tidak ada field provider), tapi worth diperiksa ulang kalau requirement sebenarnya butuh provider notification.
-10. ~~Manual retry endpoint.~~ **Selesai pada v12.0** (lihat §3.4) — operations-only (`403` kalau bukan), dibatasi `MAX_RETRY_ATTEMPTS`, atomic. Reconciliation endpoint masih belum ada method service, belum ada reconciliation orchestration (lihat P1).
-11. ~~Atomic transaction untuk payment, attempt, dan audit log.~~ **Selesai pada v10.0**, diperluas v12.0 untuk retry (`update_status_with_attempt_and_audit`) — `PgPaymentTransactionRepository` (lihat §3.3). Idempotency record **belum** ikut transaksi ini (lihat item #3) — perluasan itu jadi item tersendiri, bukan otomatis selesai bersama ini.
+10. ~~Manual retry endpoint.~~ **Selesai pada v12.0** (lihat §3.4) — operations-only (`403` kalau bukan), dibatasi `MAX_RETRY_ATTEMPTS`, atomic.
+11. ~~Atomic transaction untuk payment, attempt, dan audit log.~~ **Selesai pada v10.0**, diperluas v12.0 untuk retry (`update_status_with_attempt_and_audit`) dan v13.0 untuk reconcile (`reconcile`) — `PgPaymentTransactionRepository` (lihat §3.3). Idempotency record **belum** ikut transaksi ini (lihat item #3) — perluasan itu jadi item tersendiri, bukan otomatis selesai bersama ini.
 12. Sambungkan `IdempotencyRepository::save()` ke transaksi `create_payment` — perlu request hash dari idempotency middleware dan response body dari handler dialirkan ke `PaymentService`/`PgPaymentTransactionRepository` (kemungkinan perlu menambah parameter atau method baru di trait `PaymentTransactionRepository`).
-13. Reconciliation endpoint — satu-satunya route payment yang tersisa (§3.4). Butuh method service baru dan desain "uncertain status" (§6.1 architecture doc) yang belum dikerjakan sama sekali.
+13. ~~Reconciliation endpoint.~~ **Selesai pada v13.0** (lihat §3.4) — operations-only (`403` kalau bukan), eligibility via `PaymentStatus::needs_reconciliation()`, atomic via `PaymentTransactionRepository::reconcile`. Belum reachable lewat flow lain mana pun (belum ada worker yang men-set status `PENDING_RECONCILIATION`) dan belum pakai distributed lock (`reconcile:{payment_id}`) — keduanya masuk P1 (lihat di bawah).
 
 ### Prioritas P1 — reliability dan fallback
 
 1. Provider timeout handling dan error classification.
 2. Retry orchestration/worker dengan bounded attempts.
-3. Reconciliation service dan endpoint.
+3. Reconciliation service otomatis/worker — deteksi payment uncertain dan transisi ke `PENDING_RECONCILIATION` (endpoint manual-nya sudah selesai di v13.0, lihat §3.4/§3.6/§5 P0 item 13).
 4. Circuit breaker per provider.
 5. Safe automatic fallback dari Gateway A ke Gateway B.
-6. Locking antara retry, webhook, reconciliation, dan failover (lock helper sudah siap dipakai, tinggal diintegrasikan).
+6. Locking antara retry, webhook, reconciliation, dan failover (lock helper sudah siap dipakai, tinggal diintegrasikan — reconcile endpoint v13.0 belum pakai `reconcile:{payment_id}` lock).
 7. Late webhook dan conflicting-status handling.
 
 ### Prioritas P2 — security, observability, dan readiness
@@ -290,14 +299,15 @@ Milestone berikutnya dapat dianggap selesai jika:
 
 | Risiko / blocker | Dampak | Tindakan |
 | --- | --- | --- |
-| Reconciliation handler masih `NOT_IMPLEMENTED` | Operations tidak bisa rekonsiliasi payment yang statusnya tidak pasti lewat HTTP — create/get/search/cancel/retry sudah jalan | Kerjakan P0 §5 item 13 (reconciliation orchestration, P1) |
+| Reconcile endpoint belum reachable lewat flow lain mana pun | Endpoint `POST /payments/{id}/reconcile` sudah berfungsi, tapi tidak ada worker/trigger yang pernah men-set payment ke `PENDING_RECONCILIATION` — jadi secara praktis payment tidak akan pernah "butuh" direkonsiliasi sampai worker itu ada | Kerjakan P1 (reconciliation service otomatis/worker) |
+| Reconcile endpoint belum pakai distributed lock | Kalau operations memanggil reconcile untuk payment yang sama dua kali bersamaan, tidak ada `reconcile:{payment_id}` lock (per architecture doc) yang mencegah race — `PaymentService` belum punya dependency Redis | Tambahkan Redis lock ke `reconcile_payment` kalau concurrent-call jadi masalah nyata (lihat P1 item 6) |
 | `cancel_payment` tidak memberi tahu provider | Kalau provider masih memproses pembayaran di sisi mereka, status lokal jadi CANCELLED tapi provider tidak tahu — berpotensi payment tetap sukses di provider padahal sudah "dibatalkan" di sistem kita | Verifikasi requirement sebenarnya; kalau perlu, tambah `PaymentProvider::cancel_payment` dan panggil dari `PaymentService::cancel_payment` |
-| Retry hanya satu endpoint yang menegakkan permission operations-only | `MerchantContext::is_operations()` baru dipakai `retry_payment`; kalau reconcile nanti dikerjakan tanpa pengecekan yang sama, standard key bisa memicu reconciliation | Pastikan `is_operations()` juga dicek saat reconcile handler dikerjakan |
-| Create/Get/Search/Cancel/Retry payment, authentication & idempotency middleware, migration seed belum ditest terhadap database sungguhan | Bug logic (mis. salah tangani expired/revoked key, race condition pada lock, migration SQL yang tidak sesuai skema, atau DTO mapping yang tidak cocok skema DB) berpotensi belum terdeteksi meski unit test pure-logic/fake-repo lulus | Jalankan `sqlx migrate run` + hit endpoint sungguhan begitu Postgres/Redis tersedia |
+| Otorisasi operations-only masih inline per-handler | `MerchantContext::is_operations()` sekarang dicek terpisah di `retry_payment` dan `reconcile_payment` (v13.0) — bukan lewat middleware/extractor bersama, jadi endpoint operations-only baru berikutnya bisa lupa menambahkan cek ini | Pertimbangkan generic operations-only middleware/extractor kalau jumlah endpoint operations terus bertambah |
+| Create/Get/Search/Cancel/Retry/Reconcile payment, authentication & idempotency middleware, migration seed belum ditest terhadap database sungguhan | Bug logic (mis. salah tangani expired/revoked key, race condition pada lock, migration SQL yang tidak sesuai skema, atau DTO mapping yang tidak cocok skema DB) berpotensi belum terdeteksi meski unit test pure-logic/fake-repo lulus | Jalankan `sqlx migrate run` + hit endpoint sungguhan begitu Postgres/Redis tersedia |
 | Idempotency middleware masih belum bisa menyimpan response (sisi tulis) | Duplicate request kedua **tidak akan** di-replay dari cache — atomic transaction (v10.0) sudah menyelesaikan setengah masalah (payment+attempt+audit atomic), tapi `idempotency_keys` masih di luar transaksi itu | Kerjakan P0 §5 item 12 — perlu mengalirkan request hash + response body ke `PaymentService`/`PgPaymentTransactionRepository` |
-| Atomic transaction belum ditest terhadap Postgres sungguhan | `BEGIN`/`COMMIT`/`ROLLBACK` di `PgPaymentTransactionRepository` (create + retry) baru diverifikasi lewat fake trait di unit test, belum lewat Postgres nyata | Jalankan integration test begitu Postgres tersedia |
+| Atomic transaction belum ditest terhadap Postgres sungguhan | `BEGIN`/`COMMIT`/`ROLLBACK` di `PgPaymentTransactionRepository` (create + retry + reconcile) baru diverifikasi lewat fake trait di unit test, belum lewat Postgres nyata | Jalankan integration test begitu Postgres tersedia |
 | README lama menandai beberapa fitur runtime sebagai selesai | Ekspektasi pengguna tidak sesuai kondisi kode | Gunakan report ini sebagai sumber status; sinkronkan README berikutnya |
-| Automated test masih terbatas (66 unit test — lihat §8) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
+| Automated test masih terbatas (73 unit test — lihat §8) | Regression dan correctness belum terukur untuk domain/API/webhook/middleware end-to-end | Tambahkan test bersamaan dengan setiap use case di P0-P2 |
 | `cargo clippy` belum pernah dijalankan | Lint issue/anti-pattern berpotensi belum terdeteksi | Jalankan `cargo clippy` sebelum CI dibuat |
 | Timeout tanpa reconciliation | Risiko duplicate transaction saat fallback | Larang fallback otomatis sampai reconciliation tersedia |
 | Security layer masih skeleton | Endpoint belum aman diekspos | Jangan deploy ke production |
@@ -307,14 +317,14 @@ Milestone berikutnya dapat dianggap selesai jika:
 | Pemeriksaan | Hasil |
 | --- | --- |
 | `cargo build` (lib + bin + `gen_api_key`) | **Lulus** — 0 error, hanya warning kosmetik (`unused variable`, `dead_code` pada fungsi yang memang belum dipakai) |
-| `cargo test` | **Lulus** — 66/66 test passed (5 provider status-mapping + 10 security termasuk `is_operations` + 3 idempotency middleware + 16 `application::payment` termasuk retry + 11 DTO mapping termasuk retry response + 8 error mapping handler termasuk MAX_RETRY_REACHED + 8 request validation + 5 `domain::rules`); 0 failed |
+| `cargo test` | **Lulus** — 73/73 test passed (5 provider status-mapping + 10 security termasuk `is_operations` + 3 idempotency middleware + 22 `application::payment` termasuk retry dan reconcile + 11 DTO mapping termasuk retry response + 9 error mapping handler termasuk MAX_RETRY_REACHED dan PAYMENT_NOT_RECONCILABLE + 8 request validation + 5 `domain::rules`); 0 failed |
 | `cargo fmt -- --check` | **Lulus**, tidak ada isu format |
 | `cargo clippy` | Belum dijalankan pada pass ini — masuk backlog P3 |
 | `gen_api_key` tool | Dijalankan manual 2× untuk generate hash yang di-embed di migration seed; output diverifikasi cocok format `key_prefix`/Argon2 PHC yang diharapkan repository |
-| Authentication middleware, idempotency middleware, migration seed, create/get/search/cancel/retry payment, atomic transaction end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini. `PaymentService` (termasuk `PaymentTransactionRepository`), request validation, dan DTO/error-mapping tertest lewat fake repository/provider dan pure function (bukan DB/HTTP sungguhan) |
-| Source scan untuk TODO/stub | Ditemukan pada reconcile payment route (satu-satunya), webhook route, application services (audit/provider/reconciliation/webhook), dan test file (`tests/api`, `tests/providers`) |
-| Payment API runtime implementation | `POST /payments`, `GET /payments/{id}`, `GET /payments` (search), `POST /payments/{id}/cancel`, `POST /payments/{id}/retry` tersambung ke `PaymentService` (§3.4); reconcile masih `NOT_IMPLEMENTED` |
-| Automated test implementation | 66 test: provider (5) + security (10) + idempotency middleware (3) + payment application service (16) + DTO response mapping (11) + handler error-code mapping (8) + request validation (8) + domain rules (5); domain unit test masih parsial (cuma `rules.rs`), API integration/webhook/concurrency test belum ada |
+| Authentication middleware, idempotency middleware, migration seed, create/get/search/cancel/retry/reconcile payment, atomic transaction end-to-end | **Belum diverifikasi** — tidak ada Postgres/Docker di environment ini. `PaymentService` (termasuk `PaymentTransactionRepository`), request validation, dan DTO/error-mapping tertest lewat fake repository/provider dan pure function (bukan DB/HTTP sungguhan) |
+| Source scan untuk TODO/stub | Ditemukan pada webhook route, application services (audit/provider/reconciliation-otomatis/webhook), dan test file (`tests/api`, `tests/providers`) — reconcile payment route (§3.4) tidak lagi stub sejak v13.0 |
+| Payment API runtime implementation | Seluruh 6 route payment (`POST /payments`, `GET /payments/{id}`, `GET /payments` search, `POST /payments/{id}/cancel`, `POST /payments/{id}/retry`, `POST /payments/{id}/reconcile`) tersambung ke `PaymentService` (§3.4) — tidak ada lagi handler `NOT_IMPLEMENTED` |
+| Automated test implementation | 73 test: provider (5) + security (10) + idempotency middleware (3) + payment application service (22) + DTO response mapping (11) + handler error-code mapping (9) + request validation (8) + domain rules (5); domain unit test masih parsial (cuma `rules.rs`), API integration/webhook/concurrency test belum ada |
 | Production readiness | Tidak siap |
 
 ## 9. Changelog
@@ -334,3 +344,4 @@ Milestone berikutnya dapat dianggap selesai jika:
 | 10.0 | 17 September 2026 | Implementasi P0 atomic transaction. Trait baru `domain::repositories::PaymentTransactionRepository::create_with_attempt_and_audit`, diimplementasikan di `PgPaymentTransactionRepository` (`infrastructure/postgres/repositories.rs`) memakai `pool.begin()`/`tx.commit()` sungguhan. Query INSERT payment/attempt/audit diekstrak jadi fungsi executor-generic (`insert_payment`/`insert_attempt`/`insert_audit_log`, bertipe `E: sqlx::Executor<'e, Database = Postgres>`) supaya dipakai bersama oleh repo non-transactional (`&PgPool`) dan repo transactional baru (`&mut *tx`) tanpa duplikasi SQL. `PaymentService` diganti field-nya: `attempt_repo`/`audit_repo` dihapus, diganti `payment_tx: Arc<dyn PaymentTransactionRepository>` — `create_payment` sekarang panggil satu method atomic, bukan 3 panggilan repo terpisah. `idempotency_keys` sengaja **belum** ikut transaksi ini (butuh request hash dari middleware + response body dari handler, keduanya tidak tersedia di `PaymentService`) — dicatat sebagai P0 item terpisah. 6 test lama diganti test terhadap fake `PaymentTransactionRepository`, ditambah 1 test baru untuk kegagalan transaksi (38/38 total lulus). Belum ditest terhadap Postgres sungguhan |
 | 11.0 | 18 September 2026 | Sambungkan `GET /payments` (search) dan `POST /payments/{id}/cancel` ke `PaymentService`. Search: `PaymentService::search_payments` + `SearchPaymentParams::into_filter()` (default page/limit, bound `1..=100`, parse RFC 3339 date); ditemukan+diperbaiki bug lama — `PgPaymentRepository::search` menerima `from_date`/`to_date` di `SearchCriteria` tapi tidak pernah memfilternya, sekarang query SELECT+COUNT memfilter `created_at` dengan benar. Cancel: `PaymentService::cancel_payment` (fetch merchant-scoped → `transition_to(Cancelled)` → `update_status` → audit log best-effort); `domain::rules::validate_transition` direfactor supaya payment final ditolak dengan `DomainError::AlreadyFinal` (varian yang sudah ada tapi belum pernah dipakai) alih-alih `InvalidTransition` generik, sehingga handler bisa balas `422 PAYMENT_ALREADY_FINAL` yang presisi sesuai API contract; `PaymentService` re-menambahkan `audit_repo` sebagai kolaborator (dipakai cancel, bukan create). DTO baru: `CancelPaymentRequest::validate()`, `CancelPaymentResponse`/`CancelPaymentData` (bentuk ringkas sesuai contract), `SearchPaymentParams::into_filter()`, `PaymentSummary`/`SearchPaymentsResponse` conversion. `domain::rules::validate_transition` untuk pertama kalinya punya unit test (5 test). Manual retry dan reconcile TIDAK disentuh. 19 unit test baru (57/57 total lulus). Belum ditest terhadap Postgres sungguhan |
 | 12.0 | 18 September 2026 | Implementasi P0 manual retry. `MerchantContext::is_operations()` baru (`security/api_key.rs`) — implementasi pertama authorization operations-only, dicek di handler `retry_payment` (`403 AUTHORIZATION_FAILED` kalau bukan). `PaymentRepository::get_by_id_unscoped` baru — lookup lintas-merchant untuk flow operations (`get_by_id` yang lama tetap merchant-scoped, dipakai get/cancel). `PaymentService::retry_payment` pakai `PaymentStatus::is_retryable()` untuk eligibility (BUKAN `validate_transition`, yang sejak v11.0 menganggap FAILED sebagai final dan akan selalu menolak) — set status ke Processing secara manual, dibatasi `MAX_RETRY_ATTEMPTS` (sekarang benar-benar ditegakkan, sebelumnya konstanta tak terpakai) via `AttemptRepository::count_attempts`, `400 MAX_RETRY_REACHED` kalau melebihi. `PaymentTransactionRepository` dapat method baru `update_status_with_attempt_and_audit` (atomic: update status + insert attempt + insert audit); `PgPaymentRepository::update_status` diperluas dengan parameter `provider` (perlu untuk retry yang bisa pilih provider berbeda; kolom itu sebelumnya tidak pernah di-update lewat jalur ini) — `cancel_payment`'s call site diupdate untuk parameter baru ini (passing `None`, tidak ada perubahan perilaku). DTO baru: `RetryPaymentResponse`/`RetryPaymentData` (`{payment_id, status, attempt_number, provider, message}` sesuai kontrak). Provider error saat retry tidak dipersist (retry gagal tidak menambah hitungan `MAX_RETRY_ATTEMPTS`) — sama seperti `create_payment`. Seluruh route payment kini tersambung ke `PaymentService` kecuali reconcile. 9 unit test baru (66/66 total lulus). Belum ditest terhadap Postgres sungguhan |
+| 13.0 | 18 September 2026 | Implementasi P0 manual reconciliation — **route payment terakhir yang tersambung ke `PaymentService`**. `ReconciliationRecordRow` baru (`domain/repositories.rs`, mapping tabel `reconciliation_records`) dan method baru `PaymentTransactionRepository::reconcile` (atomic: selalu insert record, dan hanya kalau status provider berhasil di-resolve ikut update `payments.status`), diimplementasikan via helper executor-generic baru `insert_reconciliation_record` (`infrastructure/postgres/repositories.rs`, pola sama seperti `insert_payment`/`insert_attempt`/`insert_audit_log`). `ApplicationError::NotReconcilable(PaymentStatus)` baru → `409 PAYMENT_NOT_RECONCILABLE`. `PaymentService::reconcile_payment` pakai `PaymentStatus::needs_reconciliation()` untuk eligibility (bukan `validate_transition`, pola sama seperti retry v12.0) — ambil attempt terakhir, query `PaymentProvider::get_payment_status`, petakan `COMPLETED`/`FAILED`/lainnya ke `Success`/`Failed`/tetap `PENDING_RECONCILIATION` dengan resolution `UNCERTAIN`. Berbeda dari create/retry: error provider saat reconcile TIDAK di-propagate, direkam sebagai `UNCERTAIN` dengan detail error — tujuannya mencatat upaya reconciliation, bukan kehilangan jejaknya. Handler `reconcile_payment` (`api/routes/payment.rs`) cek `MerchantContext::is_operations()` sama seperti retry. DTO: `impl From<ReconciliationOutcome> for ReconcileResponse` baru (struct `ReconcileResponse`/`ReconcileData` sudah ada sebelumnya). Sengaja TIDAK diimplementasikan: insert `payment_attempts` baru untuk query reconciliation, insert `audit_logs` (record itu sendiri jadi audit trail-nya), dan Redis distributed lock `reconcile:{payment_id}` dari architecture doc (`PaymentService` belum punya dependency Redis). Endpoint sudah benar tapi **belum reachable lewat flow lain mana pun** — tidak ada worker yang mentransisikan payment ke `PENDING_RECONCILIATION` (masuk P1). Sekalian memperbaiki baris "Operational payment actions" (§3.8) yang sejak v11.0/v12.0 masih salah menyatakan "Belum" meski cancel dan retry sudah bekerja. 7 unit test baru (73/73 total lulus). Belum ditest terhadap Postgres sungguhan |

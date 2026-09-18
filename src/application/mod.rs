@@ -5,6 +5,7 @@ pub mod reconciliation;
 pub mod webhook;
 
 use crate::domain::error::DomainError;
+use crate::domain::status::PaymentStatus;
 use crate::providers::adapter::ProviderError;
 
 /// Errors surfaced by the application (orchestration) layer — a superset of
@@ -22,4 +23,7 @@ pub enum ApplicationError {
 
     #[error("Maximum retry attempts ({0}) already reached for this payment")]
     MaxRetryReached(i32),
+
+    #[error("Payment is not eligible for reconciliation (current status: {0})")]
+    NotReconcilable(PaymentStatus),
 }

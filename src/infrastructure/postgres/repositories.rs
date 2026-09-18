@@ -202,6 +202,38 @@ where
     Ok(())
 }
 
+/// Shared helper — currently only called from
+/// `PgPaymentTransactionRepository::reconcile` (always inside a
+/// transaction), but executor-generic for consistency with the other
+/// insert_* helpers in this file.
+async fn insert_reconciliation_record<'e, E>(
+    executor: E,
+    record: &ReconciliationRecordRow,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"INSERT INTO reconciliation_records (id, payment_id, payment_attempt_id,
+                 reconciliation_type, previous_status, current_status, provider_status,
+                 resolution, details, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"#,
+    )
+    .bind(record.id)
+    .bind(record.payment_id)
+    .bind(record.payment_attempt_id)
+    .bind(&record.reconciliation_type)
+    .bind(&record.previous_status)
+    .bind(&record.current_status)
+    .bind(&record.provider_status)
+    .bind(&record.resolution)
+    .bind(&record.details)
+    .bind(record.created_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl PaymentRepository for PgPaymentRepository {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError> {
@@ -598,6 +630,35 @@ impl PaymentTransactionRepository for PgPaymentTransactionRepository {
         insert_audit_log(&mut *tx, audit)
             .await
             .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn reconcile(
+        &self,
+        payment_id: Uuid,
+        resolved_status: Option<&str>,
+        record: &ReconciliationRecordRow,
+    ) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        insert_reconciliation_record(&mut *tx, record)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        if let Some(status) = resolved_status {
+            update_payment_status(&mut *tx, payment_id, status, None, None)
+                .await
+                .map_err(|e| DomainError::Validation(e.to_string()))?;
+        }
 
         tx.commit()
             .await

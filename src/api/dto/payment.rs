@@ -423,6 +423,23 @@ pub struct ReconcileData {
     pub reconciled_at: String,
 }
 
+impl From<crate::application::payment::ReconciliationOutcome> for ReconcileResponse {
+    fn from(outcome: crate::application::payment::ReconciliationOutcome) -> Self {
+        Self {
+            data: ReconcileData {
+                payment_id: outcome.payment_id.to_string(),
+                previous_status: outcome.previous_status.to_string(),
+                current_status: outcome.current_status.to_string(),
+                provider_status: outcome.provider_status,
+                resolution: outcome.resolution,
+                reconciled_at: outcome
+                    .reconciled_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            },
+        }
+    }
+}
+
 impl From<Payment> for PaymentData {
     fn from(payment: Payment) -> Self {
         Self {

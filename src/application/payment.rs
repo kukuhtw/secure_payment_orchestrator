@@ -11,7 +11,7 @@ use crate::domain::attempt::{AttemptStatus, AttemptType, PaymentAttempt};
 use crate::domain::payment::{Money, Payment};
 use crate::domain::repositories::{
     AttemptRepository, AuditLogRepository, AuditLogRow, PaginatedResult, PaymentRepository,
-    PaymentSummaryRow, PaymentTransactionRepository, SearchCriteria,
+    PaymentSummaryRow, PaymentTransactionRepository, ReconciliationRecordRow, SearchCriteria,
 };
 use crate::domain::rules::MAX_RETRY_ATTEMPTS;
 use crate::domain::status::PaymentStatus;
@@ -20,6 +20,19 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Result of [`PaymentService::reconcile_payment`] — enough for the HTTP
+/// handler to build `api::dto::payment::ReconcileResponse` without reaching
+/// back into the domain/infrastructure layers.
+#[derive(Debug, Clone)]
+pub struct ReconciliationOutcome {
+    pub payment_id: Uuid,
+    pub previous_status: PaymentStatus,
+    pub current_status: PaymentStatus,
+    pub provider_status: String,
+    pub resolution: String,
+    pub reconciled_at: DateTime<Utc>,
+}
 
 /// Input for [`PaymentService::search_payments`], decoupled from the HTTP
 /// query-string DTO (`api::dto::payment::SearchPaymentParams`) — defaults
@@ -370,6 +383,114 @@ impl PaymentService {
 
         Ok((payment, attempt_number))
     }
+
+    /// Reconcile a payment stuck in `PENDING_RECONCILIATION` by querying the
+    /// provider that handled its most recent attempt. Operations-only,
+    /// enforced by the caller via `MerchantContext::is_operations`.
+    /// Merchant-unscoped, same reasoning as `retry_payment`.
+    ///
+    /// Eligibility is `PaymentStatus::needs_reconciliation()` (i.e. status ==
+    /// `PENDING_RECONCILIATION`) — currently nothing in this codebase ever
+    /// transitions a payment INTO that status (no timeout/retry-exhaustion
+    /// worker exists yet), so this endpoint is correctly implemented but not
+    /// yet reachable through any other flow. Documented as a known gap.
+    ///
+    /// Unlike `create_payment`/`retry_payment`, a provider error here does
+    /// NOT propagate — reconciliation's whole purpose is to record what was
+    /// learned (or that nothing could be learned), so a provider failure is
+    /// captured as an `UNCERTAIN` resolution with the error in `details`
+    /// rather than losing the fact that reconciliation was attempted.
+    ///
+    /// NOTE: the architecture doc's `reconcile:{payment_id}` Redis lock
+    /// (preventing concurrent reconciliation of the same payment) is NOT
+    /// implemented — `PaymentService` has no Redis dependency today, and
+    /// adding one just for this would be a bigger structural change than
+    /// this endpoint alone warrants.
+    pub async fn reconcile_payment(
+        &self,
+        payment_id: Uuid,
+    ) -> Result<ReconciliationOutcome, ApplicationError> {
+        let row = self.payment_repo.get_by_id_unscoped(payment_id).await?;
+        let payment = Payment::try_from(row)?;
+
+        if !payment.status.needs_reconciliation() {
+            return Err(ApplicationError::NotReconcilable(payment.status));
+        }
+
+        let attempts = self.attempt_repo.get_by_payment_id(payment_id).await?;
+        let latest_attempt = attempts
+            .into_iter()
+            .max_by_key(|a| a.attempt_number)
+            .ok_or_else(|| {
+                ApplicationError::Domain(crate::domain::error::DomainError::Validation(
+                    "Payment has no attempts to reconcile against".into(),
+                ))
+            })?;
+
+        let provider_payment_id = latest_attempt.provider_payment_id.clone().ok_or_else(|| {
+            ApplicationError::Domain(crate::domain::error::DomainError::Validation(
+                "Latest attempt has no provider_payment_id".into(),
+            ))
+        })?;
+
+        let providers = self.providers.read().await;
+        let provider = providers
+            .iter()
+            .find(|p| p.name() == latest_attempt.provider)
+            .ok_or(ApplicationError::NoProviderAvailable)?;
+
+        let query_result = provider.get_payment_status(&provider_payment_id).await;
+
+        let (resolved_status, resolution, provider_status, details) = match query_result {
+            Ok(response) => {
+                let (status, resolution) = match response.provider_status.as_str() {
+                    "COMPLETED" => (Some(PaymentStatus::Success), "COMPLETED"),
+                    "FAILED" => (Some(PaymentStatus::Failed), "FAILED"),
+                    _ => (None, "UNCERTAIN"),
+                };
+                (
+                    status,
+                    resolution,
+                    Some(response.provider_status.clone()),
+                    response.raw_response.clone(),
+                )
+            }
+            Err(err) => (
+                None,
+                "UNCERTAIN",
+                None,
+                Some(serde_json::json!({ "error": err.to_string() })),
+            ),
+        };
+
+        let now = Utc::now();
+        let resolved_status_str = resolved_status.map(|s| s.to_string());
+        let record = ReconciliationRecordRow {
+            id: Uuid::new_v4(),
+            payment_id,
+            payment_attempt_id: Some(latest_attempt.id),
+            reconciliation_type: "MANUAL".into(),
+            previous_status: payment.status.to_string(),
+            current_status: resolved_status_str.clone(),
+            provider_status,
+            resolution: resolution.to_string(),
+            details,
+            created_at: now,
+        };
+
+        self.payment_tx
+            .reconcile(payment_id, resolved_status_str.as_deref(), &record)
+            .await?;
+
+        Ok(ReconciliationOutcome {
+            payment_id,
+            previous_status: payment.status,
+            current_status: resolved_status.unwrap_or(payment.status),
+            provider_status: record.provider_status.clone().unwrap_or_default(),
+            resolution: resolution.to_string(),
+            reconciled_at: now,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -453,11 +574,19 @@ mod tests {
 
     struct FakeAttemptRepository {
         count: i32,
+        attempts: Vec<PaymentAttempt>,
     }
 
     impl FakeAttemptRepository {
         fn new(count: i32) -> Self {
-            Self { count }
+            Self {
+                count,
+                attempts: Vec::new(),
+            }
+        }
+
+        fn with_attempts(count: i32, attempts: Vec<PaymentAttempt>) -> Self {
+            Self { count, attempts }
         }
     }
 
@@ -471,7 +600,7 @@ mod tests {
             &self,
             _payment_id: Uuid,
         ) -> Result<Vec<PaymentAttempt>, DomainError> {
-            unimplemented!("not exercised by these tests")
+            Ok(self.attempts.clone())
         }
 
         async fn count_attempts(&self, _payment_id: Uuid) -> Result<i32, DomainError> {
@@ -518,6 +647,7 @@ mod tests {
                 AuditLogRow,
             )>,
         >,
+        reconcile_calls: Mutex<Vec<(Uuid, Option<String>, ReconciliationRecordRow)>>,
         fail: bool,
     }
 
@@ -526,6 +656,7 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 retry_calls: Mutex::new(Vec::new()),
+                reconcile_calls: Mutex::new(Vec::new()),
                 fail: false,
             }
         }
@@ -534,6 +665,7 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 retry_calls: Mutex::new(Vec::new()),
+                reconcile_calls: Mutex::new(Vec::new()),
                 fail: true,
             }
         }
@@ -579,12 +711,30 @@ mod tests {
             ));
             Ok(())
         }
+
+        async fn reconcile(
+            &self,
+            payment_id: Uuid,
+            resolved_status: Option<&str>,
+            record: &ReconciliationRecordRow,
+        ) -> Result<(), DomainError> {
+            if self.fail {
+                return Err(DomainError::Validation("forced failure".into()));
+            }
+            self.reconcile_calls.lock().unwrap().push((
+                payment_id,
+                resolved_status.map(str::to_string),
+                record.clone(),
+            ));
+            Ok(())
+        }
     }
 
     struct FakeProvider {
         name: &'static str,
         available: bool,
         create_fn: Box<dyn Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync>,
+        status_fn: Option<Box<dyn Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync>>,
     }
 
     #[async_trait]
@@ -608,7 +758,10 @@ mod tests {
             &self,
             _provider_payment_id: &str,
         ) -> Result<ProviderResponse, ProviderError> {
-            unimplemented!("not exercised by these tests")
+            match &self.status_fn {
+                Some(f) => f(),
+                None => unimplemented!("not exercised by these tests"),
+            }
         }
     }
 
@@ -629,6 +782,19 @@ mod tests {
             name: "MIDTRANS",
             available: true,
             create_fn: Box::new(create_fn),
+            status_fn: None,
+        })
+    }
+
+    fn provider_with_status(
+        name: &'static str,
+        status_fn: impl Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync + 'static,
+    ) -> Box<dyn PaymentProvider> {
+        Box::new(FakeProvider {
+            name,
+            available: true,
+            create_fn: Box::new(|| unreachable!("reconcile must not call create_payment")),
+            status_fn: Some(Box::new(status_fn)),
         })
     }
 
@@ -714,6 +880,7 @@ mod tests {
                 name: "MIDTRANS",
                 available: false,
                 create_fn: Box::new(|| unreachable!("unavailable provider must not be called")),
+                status_fn: None,
             })]));
 
         let audit_repo = Arc::new(FakeAuditLogRepository::new());
@@ -1206,6 +1373,236 @@ mod tests {
         );
 
         let result = service.retry_payment(Uuid::new_v4(), Uuid::new_v4()).await;
+
+        assert!(matches!(
+            result,
+            Err(ApplicationError::Domain(DomainError::NotFound(_)))
+        ));
+    }
+
+    fn sample_attempt(payment_id: Uuid, attempt_number: i32, provider: &str) -> PaymentAttempt {
+        let now = Utc::now();
+        PaymentAttempt {
+            id: Uuid::new_v4(),
+            payment_id,
+            provider: provider.into(),
+            provider_payment_id: Some("prov_999".into()),
+            provider_status: Some("PENDING".into()),
+            status: AttemptStatus::Success,
+            attempt_type: AttemptType::Initial,
+            attempt_number,
+            request_snapshot: None,
+            response_snapshot: None,
+            http_status_code: None,
+            error_code: None,
+            error_message: None,
+            duration_ms: None,
+            started_at: Some(now),
+            completed_at: Some(now),
+            created_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_resolves_to_success_when_provider_reports_completed() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_id = Uuid::new_v4();
+        *payment_repo.get_by_id_result.lock().unwrap() =
+            Some(Ok(sample_payment_row("PENDING_RECONCILIATION")));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::with_attempts(
+            1,
+            vec![sample_attempt(payment_id, 1, "MIDTRANS")],
+        ));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
+            Arc::new(RwLock::new(vec![provider_with_status("MIDTRANS", || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "prov_999".into(),
+                    provider_status: "COMPLETED".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            })]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx.clone(),
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let outcome = service
+            .reconcile_payment(Uuid::new_v4())
+            .await
+            .expect("reconcile_payment should succeed");
+
+        assert_eq!(outcome.current_status, PaymentStatus::Success);
+        assert_eq!(outcome.resolution, "COMPLETED");
+
+        let calls = payment_tx.reconcile_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1.as_deref(), Some("SUCCESS"));
+        assert_eq!(calls[0].2.resolution, "COMPLETED");
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_resolves_to_failed_when_provider_reports_failed() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_id = Uuid::new_v4();
+        *payment_repo.get_by_id_result.lock().unwrap() =
+            Some(Ok(sample_payment_row("PENDING_RECONCILIATION")));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::with_attempts(
+            1,
+            vec![sample_attempt(payment_id, 1, "MIDTRANS")],
+        ));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
+            Arc::new(RwLock::new(vec![provider_with_status("MIDTRANS", || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "prov_999".into(),
+                    provider_status: "FAILED".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            })]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let outcome = service
+            .reconcile_payment(Uuid::new_v4())
+            .await
+            .expect("reconcile_payment should succeed");
+
+        assert_eq!(outcome.current_status, PaymentStatus::Failed);
+        assert_eq!(outcome.resolution, "FAILED");
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_stays_uncertain_when_provider_reports_pending() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_id = Uuid::new_v4();
+        *payment_repo.get_by_id_result.lock().unwrap() =
+            Some(Ok(sample_payment_row("PENDING_RECONCILIATION")));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::with_attempts(
+            1,
+            vec![sample_attempt(payment_id, 1, "MIDTRANS")],
+        ));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
+            Arc::new(RwLock::new(vec![provider_with_status("MIDTRANS", || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "prov_999".into(),
+                    provider_status: "PENDING".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            })]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx.clone(),
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let outcome = service
+            .reconcile_payment(Uuid::new_v4())
+            .await
+            .expect("reconcile_payment should succeed");
+
+        assert_eq!(outcome.current_status, PaymentStatus::PendingReconciliation);
+        assert_eq!(outcome.resolution, "UNCERTAIN");
+
+        let calls = payment_tx.reconcile_calls.lock().unwrap();
+        assert_eq!(calls[0].1, None); // no status update — still uncertain
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_records_uncertain_on_provider_error() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_id = Uuid::new_v4();
+        *payment_repo.get_by_id_result.lock().unwrap() =
+            Some(Ok(sample_payment_row("PENDING_RECONCILIATION")));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::with_attempts(
+            1,
+            vec![sample_attempt(payment_id, 1, "MIDTRANS")],
+        ));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> =
+            Arc::new(RwLock::new(vec![provider_with_status("MIDTRANS", || {
+                Err(ProviderError::Unavailable)
+            })]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let outcome = service
+            .reconcile_payment(Uuid::new_v4())
+            .await
+            .expect("provider errors should not fail reconcile_payment");
+
+        assert_eq!(outcome.resolution, "UNCERTAIN");
+        assert_eq!(outcome.current_status, PaymentStatus::PendingReconciliation);
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_rejects_non_reconcilable_status() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        *payment_repo.get_by_id_result.lock().unwrap() = Some(Ok(sample_payment_row("PENDING")));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::new(0));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let result = service.reconcile_payment(Uuid::new_v4()).await;
+
+        assert!(matches!(
+            result,
+            Err(ApplicationError::NotReconcilable(PaymentStatus::Pending))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconcile_payment_propagates_not_found() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let attempt_repo = Arc::new(FakeAttemptRepository::new(0));
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![]));
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let result = service.reconcile_payment(Uuid::new_v4()).await;
 
         assert!(matches!(
             result,

@@ -231,4 +231,33 @@ pub trait PaymentTransactionRepository: Send + Sync {
         attempt: &PaymentAttempt,
         audit: &AuditLogRow,
     ) -> Result<(), DomainError>;
+
+    /// Insert a reconciliation record, and — only if the provider query
+    /// resolved the payment's uncertain status (`resolved_status` is
+    /// `Some`) — update the payment's status too, atomically. When the
+    /// outcome is still uncertain (`None`), only the record is inserted;
+    /// the payment stays `PENDING_RECONCILIATION`. Used by
+    /// `PaymentService::reconcile_payment`.
+    async fn reconcile(
+        &self,
+        payment_id: Uuid,
+        resolved_status: Option<&str>,
+        record: &ReconciliationRecordRow,
+    ) -> Result<(), DomainError>;
+}
+
+// ─── Reconciliation ───────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReconciliationRecordRow {
+    pub id: Uuid,
+    pub payment_id: Uuid,
+    pub payment_attempt_id: Option<Uuid>,
+    pub reconciliation_type: String,
+    pub previous_status: String,
+    pub current_status: Option<String>,
+    pub provider_status: Option<String>,
+    pub resolution: String,
+    pub details: Option<serde_json::Value>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
