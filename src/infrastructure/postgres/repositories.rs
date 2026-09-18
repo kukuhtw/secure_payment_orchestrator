@@ -171,6 +171,37 @@ where
     Ok(())
 }
 
+/// Shared by `PgPaymentRepository::update_status` (single `&PgPool`) and
+/// `PgPaymentTransactionRepository::update_status_with_attempt_and_audit`
+/// (an open `Transaction`).
+async fn update_payment_status<'e, E>(
+    executor: E,
+    id: Uuid,
+    status: &str,
+    failure_reason: Option<&str>,
+    provider: Option<&str>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let completed_at = matches!(status, "SUCCESS" | "FAILED" | "CANCELLED").then(chrono::Utc::now);
+
+    sqlx::query(
+        r#"UPDATE payments SET status = $1, failure_reason = $2,
+                  provider = COALESCE($3, provider),
+                  completed_at = COALESCE($4, completed_at),
+                  updated_at = NOW() WHERE id = $5"#,
+    )
+    .bind(status)
+    .bind(failure_reason)
+    .bind(provider)
+    .bind(completed_at)
+    .bind(id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl PaymentRepository for PgPaymentRepository {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError> {
@@ -194,28 +225,30 @@ impl PaymentRepository for PgPaymentRepository {
         .ok_or_else(|| DomainError::NotFound("Payment not found".into()))
     }
 
+    async fn get_by_id_unscoped(&self, id: Uuid) -> Result<PaymentRow, DomainError> {
+        sqlx::query_as::<_, PaymentRow>(
+            r#"SELECT id, merchant_id, idempotency_key, merchant_reference, currency,
+                      amount, description, status, provider, failure_reason, payment_url,
+                      created_by_api_key_id, created_at, updated_at, completed_at
+               FROM payments WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Validation(e.to_string()))?
+        .ok_or_else(|| DomainError::NotFound("Payment not found".into()))
+    }
+
     async fn update_status(
         &self,
         id: Uuid,
         status: &str,
         failure_reason: Option<&str>,
+        provider: Option<&str>,
     ) -> Result<(), DomainError> {
-        let completed_at =
-            matches!(status, "SUCCESS" | "FAILED" | "CANCELLED").then(|| chrono::Utc::now());
-
-        sqlx::query(
-            r#"UPDATE payments SET status = $1, failure_reason = $2,
-                      completed_at = COALESCE($3, completed_at),
-                      updated_at = NOW() WHERE id = $4"#,
-        )
-        .bind(status)
-        .bind(failure_reason)
-        .bind(completed_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-        Ok(())
+        update_payment_status(&self.pool, id, status, failure_reason, provider)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))
     }
 
     async fn search(
@@ -523,6 +556,40 @@ impl PaymentTransactionRepository for PgPaymentTransactionRepository {
         insert_payment(&mut *tx, payment)
             .await
             .map_err(map_payment_insert_error)?;
+
+        insert_attempt(&mut *tx, attempt)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        insert_audit_log(&mut *tx, audit)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn update_status_with_attempt_and_audit(
+        &self,
+        payment_id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+        provider: Option<&str>,
+        attempt: &PaymentAttempt,
+        audit: &AuditLogRow,
+    ) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        update_payment_status(&mut *tx, payment_id, status, failure_reason, provider)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))?;
 
         insert_attempt(&mut *tx, attempt)
             .await

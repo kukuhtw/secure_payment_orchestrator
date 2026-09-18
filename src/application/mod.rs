@@ -19,4 +19,7 @@ pub enum ApplicationError {
 
     #[error("No payment provider is currently available")]
     NoProviderAvailable,
+
+    #[error("Maximum retry attempts ({0}) already reached for this payment")]
+    MaxRetryReached(i32),
 }

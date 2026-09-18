@@ -186,11 +186,17 @@ pub trait WebhookEventRepository: Send + Sync {
 pub trait PaymentRepository: Send + Sync {
     async fn create(&self, payment: &Payment) -> Result<(), DomainError>;
     async fn get_by_id(&self, id: Uuid, merchant_id: Uuid) -> Result<PaymentRow, DomainError>;
+    /// Merchant-unscoped lookup — for operations-privileged flows (manual
+    /// retry, reconciliation) that must act on any merchant's payment, not
+    /// just the one the calling API key belongs to. NEVER use this for a
+    /// merchant-facing endpoint (see `get_by_id`).
+    async fn get_by_id_unscoped(&self, id: Uuid) -> Result<PaymentRow, DomainError>;
     async fn update_status(
         &self,
         id: Uuid,
         status: &str,
         failure_reason: Option<&str>,
+        provider: Option<&str>,
     ) -> Result<(), DomainError>;
     async fn search(
         &self,
@@ -198,7 +204,7 @@ pub trait PaymentRepository: Send + Sync {
     ) -> Result<PaginatedResult<PaymentSummaryRow>, DomainError>;
 }
 
-// ─── Payment Transaction (atomic create) ─────────────────
+// ─── Payment Transaction (atomic create / atomic retry) ──
 
 #[async_trait]
 pub trait PaymentTransactionRepository: Send + Sync {
@@ -209,6 +215,19 @@ pub trait PaymentTransactionRepository: Send + Sync {
     async fn create_with_attempt_and_audit(
         &self,
         payment: &Payment,
+        attempt: &PaymentAttempt,
+        audit: &AuditLogRow,
+    ) -> Result<(), DomainError>;
+
+    /// Update an existing payment's status (and optionally its provider, if
+    /// a retry picked a different one), insert a new attempt, and log an
+    /// audit entry atomically. Used by `PaymentService::retry_payment`.
+    async fn update_status_with_attempt_and_audit(
+        &self,
+        payment_id: Uuid,
+        status: &str,
+        failure_reason: Option<&str>,
+        provider: Option<&str>,
         attempt: &PaymentAttempt,
         audit: &AuditLogRow,
     ) -> Result<(), DomainError>;

@@ -47,6 +47,7 @@ impl AppState {
         let payment_service = application::payment::PaymentService::new(
             repos.payment.clone(),
             repos.payment_tx.clone(),
+            repos.attempt.clone(),
             repos.audit_log.clone(),
             providers.clone(),
         );

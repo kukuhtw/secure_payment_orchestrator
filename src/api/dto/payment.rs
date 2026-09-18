@@ -378,6 +378,36 @@ impl From<PaginatedResult<PaymentSummaryRow>> for SearchPaymentsResponse {
     }
 }
 
+// ─── Retry Payment ──────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct RetryPaymentResponse {
+    pub data: RetryPaymentData,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RetryPaymentData {
+    pub payment_id: String,
+    pub status: String,
+    pub attempt_number: i32,
+    pub provider: String,
+    pub message: String,
+}
+
+impl From<(Payment, i32)> for RetryPaymentResponse {
+    fn from((payment, attempt_number): (Payment, i32)) -> Self {
+        Self {
+            data: RetryPaymentData {
+                payment_id: payment.id.to_string(),
+                status: payment.status.to_string(),
+                attempt_number,
+                provider: payment.provider.unwrap_or_default(),
+                message: "Retry initiated".into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReconcileResponse {
     pub data: ReconcileData,
@@ -692,5 +722,21 @@ mod tests {
         assert_eq!(response.data.payments[0].merchant_reference, "ORDER-10001");
         assert_eq!(response.data.pagination.total_items, 21);
         assert_eq!(response.data.pagination.total_pages, 2);
+    }
+
+    #[test]
+    fn maps_retry_result_to_response() {
+        let money = Money::new(250_000, "IDR").unwrap();
+        let mut payment = Payment::new(Uuid::new_v4(), "key".into(), "REF".into(), money, None);
+        payment.status = crate::domain::status::PaymentStatus::Processing;
+        payment.provider = Some("XENDIT".into());
+
+        let response: RetryPaymentResponse = (payment.clone(), 2).into();
+
+        assert_eq!(response.data.payment_id, payment.id.to_string());
+        assert_eq!(response.data.status, "PROCESSING");
+        assert_eq!(response.data.attempt_number, 2);
+        assert_eq!(response.data.provider, "XENDIT");
+        assert_eq!(response.data.message, "Retry initiated");
     }
 }

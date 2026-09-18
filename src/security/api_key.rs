@@ -34,6 +34,16 @@ pub struct MerchantContext {
     pub permissions: String,
 }
 
+impl MerchantContext {
+    /// True for `operations`/`admin` keys — the only ones permitted to call
+    /// operations-only endpoints (e.g. `POST /payments/{id}/retry`), per
+    /// `documentation/api/API-Contract-Secure-Payment-Orchestrator.md` §3.5.
+    /// `admin` is treated as a superset of `operations`.
+    pub fn is_operations(&self) -> bool {
+        matches!(self.permissions.as_str(), "operations" | "admin")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +74,24 @@ mod tests {
     #[test]
     fn key_prefix_shorter_than_limit_returns_whole_key() {
         assert_eq!(key_prefix("short"), "short");
+    }
+
+    fn context_with(permissions: &str) -> MerchantContext {
+        MerchantContext {
+            merchant_id: Uuid::nil(),
+            api_key_id: Uuid::nil(),
+            permissions: permissions.into(),
+        }
+    }
+
+    #[test]
+    fn operations_and_admin_permissions_are_operations() {
+        assert!(context_with("operations").is_operations());
+        assert!(context_with("admin").is_operations());
+    }
+
+    #[test]
+    fn standard_permission_is_not_operations() {
+        assert!(!context_with("standard").is_operations());
     }
 }

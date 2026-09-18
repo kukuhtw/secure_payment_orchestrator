@@ -110,6 +110,11 @@ fn map_application_error(err: ApplicationError) -> ApiError {
             "PROVIDER_UNAVAILABLE",
             "No payment provider is currently available",
         ),
+        ApplicationError::MaxRetryReached(max) => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "MAX_RETRY_REACHED",
+            format!("Maximum retry attempts ({max}) already reached for this payment"),
+        ),
     }
 }
 
@@ -182,11 +187,29 @@ async fn cancel_payment(
 
 async fn retry_payment(
     State(state): State<SharedState>,
+    Extension(merchant): Extension<MerchantContext>,
     Path(payment_id): Path<String>,
-) -> Result<Json<PaymentResponse>, ApiError> {
-    // TODO: Implement manual retry
+) -> Result<Json<RetryPaymentResponse>, ApiError> {
     tracing::info!("Retry payment: {}", payment_id);
-    Err(ApiError::not_implemented("retry_payment"))
+
+    if !merchant.is_operations() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "AUTHORIZATION_FAILED",
+            "This endpoint requires an operations API key",
+        ));
+    }
+
+    let payment_id = Uuid::parse_str(&payment_id)
+        .map_err(|_| ApiError::bad_request("Invalid payment_id format"))?;
+
+    let (payment, attempt_number) = state
+        .payment_service
+        .retry_payment(merchant.api_key_id, payment_id)
+        .await
+        .map_err(|err| map_payment_lookup_error(err, payment_id))?;
+
+    Ok(Json((payment, attempt_number).into()))
 }
 
 async fn reconcile_payment(
@@ -273,5 +296,14 @@ mod tests {
 
         assert_eq!(api_err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(api_err.error.code, "INVALID_STATUS_TRANSITION");
+    }
+
+    #[test]
+    fn maps_max_retry_reached_to_400() {
+        let err = ApplicationError::MaxRetryReached(5);
+        let api_err = map_application_error(err);
+
+        assert_eq!(api_err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(api_err.error.code, "MAX_RETRY_REACHED");
     }
 }
