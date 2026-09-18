@@ -27,6 +27,7 @@ pub struct NicepayProvider {
     pay_method: String,
     client: Client,
     timeout_seconds: u64,
+    priority: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +67,7 @@ impl NicepayProvider {
         base_url: &str,
         pay_method: &str,
         timeout_seconds: u64,
+        priority: i32,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
@@ -79,6 +81,7 @@ impl NicepayProvider {
             pay_method: pay_method.into(),
             client,
             timeout_seconds,
+            priority,
         })
     }
 
@@ -161,6 +164,10 @@ impl PaymentProvider for NicepayProvider {
 
     fn is_available(&self) -> bool {
         !self.imid.trim().is_empty() && !self.merchant_key.trim().is_empty()
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority
     }
 
     async fn create_payment(

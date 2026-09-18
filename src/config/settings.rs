@@ -12,19 +12,26 @@ pub struct Settings {
     pub midtrans_snap_base_url: String,
     pub midtrans_core_base_url: String,
     pub midtrans_timeout_seconds: u64,
+    /// Lower = selected first among available providers. Defaults preserve
+    /// the pre-v15.0 registration order (Midtrans, Xendit, DOKU, NICEPAY)
+    /// so behavior doesn't change unless a deployment overrides it.
+    pub midtrans_priority: i32,
     pub xendit_secret_key: String,
     pub xendit_callback_token: String,
     pub xendit_base_url: String,
     pub xendit_timeout_seconds: u64,
+    pub xendit_priority: i32,
     pub doku_client_id: String,
     pub doku_secret_key: String,
     pub doku_base_url: String,
     pub doku_timeout_seconds: u64,
+    pub doku_priority: i32,
     pub nicepay_imid: String,
     pub nicepay_merchant_key: String,
     pub nicepay_base_url: String,
     pub nicepay_pay_method: String,
     pub nicepay_timeout_seconds: u64,
+    pub nicepay_priority: i32,
     pub max_retry_attempts: i32,
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_timeout_seconds: u64,
@@ -52,12 +59,18 @@ impl Settings {
             midtrans_timeout_seconds: std::env::var("MIDTRANS_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
                 .parse()?,
+            midtrans_priority: std::env::var("MIDTRANS_PRIORITY")
+                .unwrap_or_else(|_| "10".into())
+                .parse()?,
             xendit_secret_key: std::env::var("XENDIT_SECRET_KEY").unwrap_or_default(),
             xendit_callback_token: std::env::var("XENDIT_CALLBACK_TOKEN").unwrap_or_default(),
             xendit_base_url: std::env::var("XENDIT_BASE_URL")
                 .unwrap_or_else(|_| "https://api.xendit.co".into()),
             xendit_timeout_seconds: std::env::var("XENDIT_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
+                .parse()?,
+            xendit_priority: std::env::var("XENDIT_PRIORITY")
+                .unwrap_or_else(|_| "20".into())
                 .parse()?,
             doku_client_id: std::env::var("DOKU_CLIENT_ID").unwrap_or_default(),
             doku_secret_key: std::env::var("DOKU_SECRET_KEY").unwrap_or_default(),
@@ -66,6 +79,9 @@ impl Settings {
             doku_timeout_seconds: std::env::var("DOKU_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
                 .parse()?,
+            doku_priority: std::env::var("DOKU_PRIORITY")
+                .unwrap_or_else(|_| "30".into())
+                .parse()?,
             nicepay_imid: std::env::var("NICEPAY_IMID").unwrap_or_default(),
             nicepay_merchant_key: std::env::var("NICEPAY_MERCHANT_KEY").unwrap_or_default(),
             nicepay_base_url: std::env::var("NICEPAY_BASE_URL")
@@ -73,6 +89,9 @@ impl Settings {
             nicepay_pay_method: std::env::var("NICEPAY_PAY_METHOD").unwrap_or_else(|_| "01".into()),
             nicepay_timeout_seconds: std::env::var("NICEPAY_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "10".into())
+                .parse()?,
+            nicepay_priority: std::env::var("NICEPAY_PRIORITY")
+                .unwrap_or_else(|_| "40".into())
                 .parse()?,
             max_retry_attempts: std::env::var("MAX_RETRY_ATTEMPTS")
                 .unwrap_or_else(|_| "5".into())

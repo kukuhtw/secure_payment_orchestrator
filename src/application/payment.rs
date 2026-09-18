@@ -65,6 +65,30 @@ pub struct CreatePaymentInput {
     pub description: Option<String>,
 }
 
+/// Among `is_available()` providers, pick the one with the lowest
+/// `priority()` value (see `PaymentProvider::priority` for why lower
+/// wins — it's config-driven, not registration order). Shared by
+/// `PaymentService::create_payment` and `retry_payment`, the only two
+/// places that select a provider today.
+///
+/// Ties fall back to iteration order via `Iterator::min_by_key`'s
+/// "first minimum wins" behavior — not disambiguated further, since
+/// ties aren't expected in practice (each provider's priority is
+/// independently configured via `Settings::*_priority`).
+///
+/// This is priority-based selection only — it does NOT check circuit
+/// breaker state (no such state exists yet, see `PaymentProvider::
+/// is_available`'s doc comment) or attempt automatic fallback to a
+/// second provider after the chosen one fails. Both remain P1.
+fn select_best_provider(
+    providers: &[Box<dyn PaymentProvider>],
+) -> Option<&Box<dyn PaymentProvider>> {
+    providers
+        .iter()
+        .filter(|p| p.is_available())
+        .min_by_key(|p| p.priority())
+}
+
 pub struct PaymentService {
     payment_repo: Arc<dyn PaymentRepository>,
     payment_tx: Arc<dyn PaymentTransactionRepository>,
@@ -95,9 +119,13 @@ impl PaymentService {
     /// record atomically (single DB transaction via
     /// `PaymentTransactionRepository`).
     ///
-    /// NOTE: provider selection here is a naive "first available" pick — a
-    /// placeholder for the still-open P0 item "Provider selection by
-    /// availability/priority" (circuit breaker awareness, priority ordering).
+    /// Provider selection is `select_best_provider` — available providers
+    /// ranked by configured `priority()` (lower wins), not registration
+    /// order. It does NOT account for circuit breaker state (not
+    /// implemented yet, see `PaymentProvider::is_available`) or retry a
+    /// second provider if the chosen one's `create_payment` call fails —
+    /// both remain P1 ("Circuit breaker per provider", "Safe automatic
+    /// fallback").
     ///
     /// `response_snapshot` builds the JSON body to cache for idempotent
     /// replay (`IdempotencyRow::response_body`) from the finished-but-not-
@@ -125,10 +153,8 @@ impl PaymentService {
         );
 
         let providers = self.providers.read().await;
-        let provider = providers
-            .iter()
-            .find(|p| p.is_available())
-            .ok_or(ApplicationError::NoProviderAvailable)?;
+        let provider =
+            select_best_provider(&providers).ok_or(ApplicationError::NoProviderAvailable)?;
 
         let provider_request = ProviderRequest {
             amount: payment.amount.amount,
@@ -309,12 +335,13 @@ impl PaymentService {
     /// FAILED as final and would reject every retry. Bounded by
     /// `MAX_RETRY_ATTEMPTS` via `AttemptRepository::count_attempts`.
     ///
-    /// NOTE: provider selection is the same naive "first available" as
-    /// `create_payment` — no failover-aware selection yet. A provider
-    /// failure during retry propagates without persisting anything (same
-    /// as `create_payment`), so a failed retry attempt does NOT count
-    /// against `MAX_RETRY_ATTEMPTS` (only previously-successful attempts
-    /// are persisted and counted).
+    /// NOTE: provider selection is the same `select_best_provider` as
+    /// `create_payment` — priority-based, but still no failover-aware
+    /// selection (doesn't retry a second provider if the chosen one's
+    /// call fails). A provider failure during retry propagates without
+    /// persisting anything (same as `create_payment`), so a failed retry
+    /// attempt does NOT count against `MAX_RETRY_ATTEMPTS` (only
+    /// previously-successful attempts are persisted and counted).
     pub async fn retry_payment(
         &self,
         actor_api_key_id: Uuid,
@@ -337,10 +364,8 @@ impl PaymentService {
         }
 
         let providers = self.providers.read().await;
-        let provider = providers
-            .iter()
-            .find(|p| p.is_available())
-            .ok_or(ApplicationError::NoProviderAvailable)?;
+        let provider =
+            select_best_provider(&providers).ok_or(ApplicationError::NoProviderAvailable)?;
 
         let provider_request = ProviderRequest {
             amount: payment.amount.amount,
@@ -762,6 +787,7 @@ mod tests {
     struct FakeProvider {
         name: &'static str,
         available: bool,
+        priority: i32,
         create_fn: Box<dyn Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync>,
         status_fn: Option<Box<dyn Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync>>,
     }
@@ -774,6 +800,10 @@ mod tests {
 
         fn is_available(&self) -> bool {
             self.available
+        }
+
+        fn priority(&self) -> i32 {
+            self.priority
         }
 
         async fn create_payment(
@@ -818,6 +848,21 @@ mod tests {
         Box::new(FakeProvider {
             name: "MIDTRANS",
             available: true,
+            priority: 10,
+            create_fn: Box::new(create_fn),
+            status_fn: None,
+        })
+    }
+
+    fn provider_with_priority(
+        name: &'static str,
+        priority: i32,
+        create_fn: impl Fn() -> Result<ProviderResponse, ProviderError> + Send + Sync + 'static,
+    ) -> Box<dyn PaymentProvider> {
+        Box::new(FakeProvider {
+            name,
+            available: true,
+            priority,
             create_fn: Box::new(create_fn),
             status_fn: None,
         })
@@ -830,6 +875,7 @@ mod tests {
         Box::new(FakeProvider {
             name,
             available: true,
+            priority: 10,
             create_fn: Box::new(|| unreachable!("reconcile must not call create_payment")),
             status_fn: Some(Box::new(status_fn)),
         })
@@ -894,6 +940,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_payment_selects_lowest_priority_value_not_registration_order() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        // XENDIT (priority 20) registered FIRST, MIDTRANS (priority 10)
+        // registered SECOND — if selection were still "first available in
+        // Vec order", XENDIT would win. It shouldn't: lower priority value
+        // wins regardless of registration order.
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![
+            provider_with_priority("XENDIT", 20, || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "xendit_1".into(),
+                    provider_status: "PENDING".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            }),
+            provider_with_priority("MIDTRANS", 10, || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "midtrans_1".into(),
+                    provider_status: "PENDING".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            }),
+        ]));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::new(0));
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let payment = service
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                sample_input(),
+                fake_response_snapshot,
+            )
+            .await
+            .expect("create_payment should succeed");
+
+        assert_eq!(payment.provider.as_deref(), Some("MIDTRANS"));
+    }
+
+    #[tokio::test]
+    async fn create_payment_skips_unavailable_provider_regardless_of_priority() {
+        let payment_repo = Arc::new(FakePaymentRepository::new());
+        let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
+        // MIDTRANS has the better (lower) priority value but is
+        // unavailable — XENDIT, worse priority but available, must win.
+        let providers: Arc<RwLock<Vec<Box<dyn PaymentProvider>>>> = Arc::new(RwLock::new(vec![
+            Box::new(FakeProvider {
+                name: "MIDTRANS",
+                available: false,
+                priority: 10,
+                create_fn: Box::new(|| unreachable!("unavailable provider must not be called")),
+                status_fn: None,
+            }),
+            provider_with_priority("XENDIT", 20, || {
+                Ok(ProviderResponse {
+                    provider_payment_id: "xendit_1".into(),
+                    provider_status: "PENDING".into(),
+                    payment_url: None,
+                    raw_response: None,
+                })
+            }),
+        ]));
+
+        let attempt_repo = Arc::new(FakeAttemptRepository::new(0));
+        let audit_repo = Arc::new(FakeAuditLogRepository::new());
+        let service = PaymentService::new(
+            payment_repo,
+            payment_tx,
+            attempt_repo,
+            audit_repo,
+            providers,
+        );
+
+        let payment = service
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                sample_input(),
+                fake_response_snapshot,
+            )
+            .await
+            .expect("create_payment should succeed");
+
+        assert_eq!(payment.provider.as_deref(), Some("XENDIT"));
+    }
+
+    #[tokio::test]
     async fn create_payment_rejects_invalid_amount_without_touching_transaction() {
         let payment_repo = Arc::new(FakePaymentRepository::new());
         let payment_tx = Arc::new(FakePaymentTransactionRepository::new());
@@ -933,6 +1076,7 @@ mod tests {
             Arc::new(RwLock::new(vec![Box::new(FakeProvider {
                 name: "MIDTRANS",
                 available: false,
+                priority: 10,
                 create_fn: Box::new(|| unreachable!("unavailable provider must not be called")),
                 status_fn: None,
             })]));

@@ -20,6 +20,7 @@ pub struct AlphaProvider {
     core_base_url: String,
     client: Client,
     timeout_seconds: u64,
+    priority: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +52,7 @@ impl AlphaProvider {
         snap_base_url: &str,
         core_base_url: &str,
         timeout_seconds: u64,
+        priority: i32,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
@@ -63,6 +65,7 @@ impl AlphaProvider {
             core_base_url: core_base_url.trim_end_matches('/').into(),
             client,
             timeout_seconds,
+            priority,
         })
     }
 
@@ -147,6 +150,10 @@ impl PaymentProvider for AlphaProvider {
 
     fn is_available(&self) -> bool {
         !self.server_key.trim().is_empty()
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority
     }
 
     async fn create_payment(

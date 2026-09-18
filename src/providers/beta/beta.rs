@@ -18,6 +18,7 @@ pub struct BetaProvider {
     base_url: String,
     client: Client,
     timeout_seconds: u64,
+    priority: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,7 +41,12 @@ struct InvoiceResponse {
 }
 
 impl BetaProvider {
-    pub fn new(secret_key: &str, base_url: &str, timeout_seconds: u64) -> anyhow::Result<Self> {
+    pub fn new(
+        secret_key: &str,
+        base_url: &str,
+        timeout_seconds: u64,
+        priority: i32,
+    ) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
             .build()?;
@@ -51,6 +57,7 @@ impl BetaProvider {
             base_url: base_url.trim_end_matches('/').into(),
             client,
             timeout_seconds,
+            priority,
         })
     }
 
@@ -127,6 +134,10 @@ impl PaymentProvider for BetaProvider {
 
     fn is_available(&self) -> bool {
         !self.secret_key.trim().is_empty()
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority
     }
 
     async fn create_payment(

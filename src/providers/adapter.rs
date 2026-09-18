@@ -50,8 +50,19 @@ pub trait PaymentProvider: Send + Sync {
     /// Nama provider (digunakan untuk routing dan logging).
     fn name(&self) -> &str;
 
-    /// Apakah provider saat ini tersedia (circuit breaker check).
+    /// Apakah provider saat ini tersedia. Saat ini hanya cek konfigurasi
+    /// (mis. Server Key kosong) — BUKAN circuit breaker sungguhan (tidak
+    /// ada state CLOSED/OPEN/HALF_OPEN yang melacak kegagalan runtime).
+    /// Circuit breaker per provider masih P1 (lihat Progress-Report.md §5).
     fn is_available(&self) -> bool;
+
+    /// Prioritas seleksi di antara provider yang `is_available()` — nilai
+    /// lebih kecil dipilih lebih dulu. Dibaca dari konfigurasi
+    /// (`Settings::*_priority`) lewat `providers::build_providers`, bukan
+    /// hardcoded di sini, supaya urutan bisa diatur per-deployment tanpa
+    /// mengubah kode. Lihat `PaymentService::create_payment`/`retry_payment`
+    /// untuk cara ini dipakai.
+    fn priority(&self) -> i32;
 
     /// Buat pembayaran di provider.
     async fn create_payment(
