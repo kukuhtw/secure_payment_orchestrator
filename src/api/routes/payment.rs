@@ -35,7 +35,7 @@ pub fn routes() -> Router<SharedState> {
 async fn create_payment(
     State(state): State<SharedState>,
     Extension(merchant): Extension<MerchantContext>,
-    Extension(IdempotencyKey(idempotency_key)): Extension<IdempotencyKey>,
+    Extension(idempotency): Extension<IdempotencyKey>,
     Json(req): Json<CreatePaymentRequest>,
 ) -> Result<(StatusCode, Json<PaymentResponse>), ApiError> {
     tracing::info!("Create payment: {:?}", req.merchant_reference);
@@ -43,16 +43,25 @@ async fn create_payment(
     req.validate()?;
 
     let input = crate::application::payment::CreatePaymentInput {
-        idempotency_key,
+        idempotency_key: idempotency.key,
+        request_hash: idempotency.request_hash,
         merchant_reference: req.merchant_reference,
         amount: req.amount,
         currency: req.currency,
         description: req.description,
     };
 
+    // Built from the in-memory `Payment` before it's persisted, so the
+    // idempotency row's cached response body matches exactly what this
+    // handler itself returns below on `201 Created` — see
+    // `PaymentService::create_payment`'s doc comment for why this is a
+    // closure rather than the service building `PaymentResponse` itself.
     let payment = state
         .payment_service
-        .create_payment(merchant.merchant_id, merchant.api_key_id, input)
+        .create_payment(merchant.merchant_id, merchant.api_key_id, input, |p| {
+            serde_json::to_value(PaymentResponse::from(p.clone()))
+                .unwrap_or(serde_json::Value::Null)
+        })
         .await
         .map_err(map_application_error)?;
 

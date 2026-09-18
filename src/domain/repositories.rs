@@ -208,15 +208,19 @@ pub trait PaymentRepository: Send + Sync {
 
 #[async_trait]
 pub trait PaymentTransactionRepository: Send + Sync {
-    /// Persist a new payment, its initial attempt, and an audit log entry
-    /// atomically — all three succeed or all three roll back together.
-    /// Used by `PaymentService::create_payment` instead of three separate
-    /// `PaymentRepository`/`AttemptRepository`/`AuditLogRepository` calls.
+    /// Persist a new payment, its initial attempt, an audit log entry, and
+    /// — when the caller has one ready — the `idempotency_keys` row, all
+    /// atomically: every part succeeds or every part rolls back together.
+    /// Used by `PaymentService::create_payment` instead of four separate
+    /// `PaymentRepository`/`AttemptRepository`/`AuditLogRepository`/
+    /// `IdempotencyRepository` calls. `idempotency` is `None` only in
+    /// tests/paths that don't go through the idempotency middleware.
     async fn create_with_attempt_and_audit(
         &self,
         payment: &Payment,
         attempt: &PaymentAttempt,
         audit: &AuditLogRow,
+        idempotency: Option<&IdempotencyRow>,
     ) -> Result<(), DomainError>;
 
     /// Update an existing payment's status (and optionally its provider, if

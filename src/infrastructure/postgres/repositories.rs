@@ -202,6 +202,32 @@ where
     Ok(())
 }
 
+/// Shared by `PgIdempotencyRepository::save` (single `&PgPool`, used when a
+/// caller isn't going through the atomic create path) and
+/// `PgPaymentTransactionRepository::create_with_attempt_and_audit` (an open
+/// `Transaction`).
+async fn insert_idempotency_row<'e, E>(executor: E, row: &IdempotencyRow) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        r#"INSERT INTO idempotency_keys (idempotency_key, merchant_id, request_hash,
+                 payment_id, response_status_code, response_body, created_at, expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#,
+    )
+    .bind(&row.idempotency_key)
+    .bind(row.merchant_id)
+    .bind(&row.request_hash)
+    .bind(row.payment_id)
+    .bind(&row.response_status_code)
+    .bind(&row.response_body)
+    .bind(row.created_at)
+    .bind(row.expires_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Shared helper — currently only called from
 /// `PgPaymentTransactionRepository::reconcile` (always inside a
 /// transaction), but executor-generic for consistency with the other
@@ -539,23 +565,9 @@ impl IdempotencyRepository for PgIdempotencyRepository {
     }
 
     async fn save(&self, row: &IdempotencyRow) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"INSERT INTO idempotency_keys (idempotency_key, merchant_id, request_hash,
-                     payment_id, response_status_code, response_body, created_at, expires_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#,
-        )
-        .bind(&row.idempotency_key)
-        .bind(row.merchant_id)
-        .bind(&row.request_hash)
-        .bind(row.payment_id)
-        .bind(&row.response_status_code)
-        .bind(&row.response_body)
-        .bind(row.created_at)
-        .bind(row.expires_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DomainError::Validation(e.to_string()))?;
-        Ok(())
+        insert_idempotency_row(&self.pool, row)
+            .await
+            .map_err(|e| DomainError::Validation(e.to_string()))
     }
 }
 
@@ -578,6 +590,7 @@ impl PaymentTransactionRepository for PgPaymentTransactionRepository {
         payment: &Payment,
         attempt: &PaymentAttempt,
         audit: &AuditLogRow,
+        idempotency: Option<&IdempotencyRow>,
     ) -> Result<(), DomainError> {
         let mut tx = self
             .pool
@@ -596,6 +609,12 @@ impl PaymentTransactionRepository for PgPaymentTransactionRepository {
         insert_audit_log(&mut *tx, audit)
             .await
             .map_err(|e| DomainError::Validation(e.to_string()))?;
+
+        if let Some(row) = idempotency {
+            insert_idempotency_row(&mut *tx, row)
+                .await
+                .map_err(|e| DomainError::Validation(e.to_string()))?;
+        }
 
         tx.commit()
             .await

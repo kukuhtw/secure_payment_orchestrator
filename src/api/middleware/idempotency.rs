@@ -7,11 +7,12 @@
 //! sudah tersimpan (return cached response), menolak payload berbeda dengan
 //! key yang sama (409 `IDEMPOTENCY_MISMATCH`), dan mencegah dua request
 //! konkuren dengan key yang sama diproses bersamaan (Redis lock). Bagian
-//! *tulis* — menyimpan `IdempotencyRow` (butuh `payment_id`, harus atomic
-//! dengan insert payment) — sengaja belum dilakukan di sini; itu tanggung
-//! jawab payment application service saat item P0 "Atomic transaction"
-//! dikerjakan, supaya payment + idempotency record + audit log tersimpan
-//! dalam satu transaksi database yang sama.
+//! *tulis* — menyimpan `IdempotencyRow` — dilakukan oleh
+//! `PaymentService::create_payment` (lihat `PaymentTransactionRepository::
+//! create_with_attempt_and_audit`), atomic dengan insert payment. Middleware
+//! ini hanya menghitung `request_hash` dan mengalirkannya ke handler lewat
+//! [`IdempotencyKey`] — ia sendiri tidak pernah menulis ke
+//! `idempotency_keys`.
 
 use crate::api::dto::error::ApiError;
 use crate::domain::repositories::IdempotencyRow;
@@ -36,10 +37,16 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Matches `idempotency_keys.idempotency_key VARCHAR(255)`.
 const IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
 
-/// The validated `Idempotency-Key` header value, attached to request
-/// extensions so handlers don't need to re-parse the header themselves.
+/// The validated `Idempotency-Key` header value and the SHA-256 hash of the
+/// raw request body, attached to request extensions so handlers don't need
+/// to re-parse the header or re-hash the body themselves — `create_payment`
+/// needs both to persist the `idempotency_keys` row atomically with the
+/// payment (see `PaymentService::create_payment`).
 #[derive(Debug, Clone)]
-pub struct IdempotencyKey(pub String);
+pub struct IdempotencyKey {
+    pub key: String,
+    pub request_hash: String,
+}
 
 /// Axum middleware: enforces `Idempotency-Key` on POST payment routes.
 ///
@@ -124,9 +131,10 @@ pub async fn require_idempotency_key(
     }
 
     let mut parts = parts;
-    parts
-        .extensions
-        .insert(IdempotencyKey(idempotency_key.clone()));
+    parts.extensions.insert(IdempotencyKey {
+        key: idempotency_key.clone(),
+        request_hash: request_hash.clone(),
+    });
     let req = Request::from_parts(parts, Body::from(body_bytes));
     let response = next.run(req).await;
 

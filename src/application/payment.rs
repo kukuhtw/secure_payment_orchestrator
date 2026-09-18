@@ -10,8 +10,9 @@ use crate::application::ApplicationError;
 use crate::domain::attempt::{AttemptStatus, AttemptType, PaymentAttempt};
 use crate::domain::payment::{Money, Payment};
 use crate::domain::repositories::{
-    AttemptRepository, AuditLogRepository, AuditLogRow, PaginatedResult, PaymentRepository,
-    PaymentSummaryRow, PaymentTransactionRepository, ReconciliationRecordRow, SearchCriteria,
+    AttemptRepository, AuditLogRepository, AuditLogRow, IdempotencyRow, PaginatedResult,
+    PaymentRepository, PaymentSummaryRow, PaymentTransactionRepository, ReconciliationRecordRow,
+    SearchCriteria,
 };
 use crate::domain::rules::MAX_RETRY_ATTEMPTS;
 use crate::domain::status::PaymentStatus;
@@ -50,11 +51,14 @@ pub struct SearchPaymentsFilter {
 }
 
 /// Input for [`PaymentService::create_payment`], decoupled from the HTTP DTO
-/// (`api::dto::payment::CreatePaymentRequest`) — `idempotency_key` in
-/// particular comes from the `Idempotency-Key` header, not the JSON body.
+/// (`api::dto::payment::CreatePaymentRequest`) — `idempotency_key` and
+/// `request_hash` both come from the idempotency middleware (the latter is
+/// the SHA-256 hash of the raw request body it already computed), not the
+/// JSON body itself.
 #[derive(Debug, Clone)]
 pub struct CreatePaymentInput {
     pub idempotency_key: String,
+    pub request_hash: String,
     pub merchant_reference: String,
     pub amount: i64,
     pub currency: String,
@@ -87,23 +91,29 @@ impl PaymentService {
     }
 
     /// Validate, pick a provider, create the payment at the provider, then
-    /// persist the payment + initial attempt + audit log atomically (single
-    /// DB transaction via `PaymentTransactionRepository`).
+    /// persist the payment + initial attempt + audit log + idempotency
+    /// record atomically (single DB transaction via
+    /// `PaymentTransactionRepository`).
     ///
     /// NOTE: provider selection here is a naive "first available" pick — a
     /// placeholder for the still-open P0 item "Provider selection by
     /// availability/priority" (circuit breaker awareness, priority ordering).
     ///
-    /// NOTE: the `idempotency_keys` row is NOT part of this transaction —
-    /// persisting it needs the request hash (computed in the idempotency
-    /// middleware) and the serialized response body (built in the HTTP
-    /// handler after this returns), neither of which this service has. That
-    /// remains a separate follow-up.
+    /// `response_snapshot` builds the JSON body to cache for idempotent
+    /// replay (`IdempotencyRow::response_body`) from the finished-but-not-
+    /// yet-persisted `Payment`. It's a caller-supplied closure rather than
+    /// this layer building `api::dto::payment::PaymentResponse` itself,
+    /// because `application` must not depend on `api` — the HTTP handler
+    /// owns the response shape and hands this service an opaque JSON value.
+    /// The handler is also responsible for keeping the closure's output in
+    /// sync with whatever it actually returns on `201 Created`; nothing here
+    /// enforces that at compile time.
     pub async fn create_payment(
         &self,
         merchant_id: Uuid,
         actor_api_key_id: Uuid,
         input: CreatePaymentInput,
+        response_snapshot: impl FnOnce(&Payment) -> serde_json::Value,
     ) -> Result<Payment, ApplicationError> {
         let amount = Money::new(input.amount, input.currency)?;
         let mut payment = Payment::new(
@@ -174,8 +184,24 @@ impl PaymentService {
             created_at: now,
         };
 
+        let idempotency_row = IdempotencyRow {
+            idempotency_key: payment.idempotency_key.clone(),
+            merchant_id,
+            request_hash: input.request_hash,
+            payment_id: payment.id,
+            // Matches the fixed `201 Created` the HTTP handler returns on
+            // this path — create_payment only ever produces that status.
+            response_status_code: Some("201".to_string()),
+            response_body: Some(response_snapshot(&payment)),
+            created_at: now,
+            // Matches `idempotency_keys.expires_at`'s DB default (24h) — set
+            // explicitly here rather than relying on it, consistent with
+            // how the other insert_* helpers bind every column themselves.
+            expires_at: now + chrono::Duration::hours(24),
+        };
+
         self.payment_tx
-            .create_with_attempt_and_audit(&payment, &attempt, &audit)
+            .create_with_attempt_and_audit(&payment, &attempt, &audit, Some(&idempotency_row))
             .await?;
 
         Ok(payment)
@@ -636,7 +662,7 @@ mod tests {
     }
 
     struct FakePaymentTransactionRepository {
-        calls: Mutex<Vec<(Payment, PaymentAttempt, AuditLogRow)>>,
+        calls: Mutex<Vec<(Payment, PaymentAttempt, AuditLogRow, Option<IdempotencyRow>)>>,
         retry_calls: Mutex<
             Vec<(
                 Uuid,
@@ -678,14 +704,17 @@ mod tests {
             payment: &Payment,
             attempt: &PaymentAttempt,
             audit: &AuditLogRow,
+            idempotency: Option<&IdempotencyRow>,
         ) -> Result<(), DomainError> {
             if self.fail {
                 return Err(DomainError::Validation("forced failure".into()));
             }
-            self.calls
-                .lock()
-                .unwrap()
-                .push((payment.clone(), attempt.clone(), audit.clone()));
+            self.calls.lock().unwrap().push((
+                payment.clone(),
+                attempt.clone(),
+                audit.clone(),
+                idempotency.cloned(),
+            ));
             Ok(())
         }
 
@@ -768,11 +797,19 @@ mod tests {
     fn sample_input() -> CreatePaymentInput {
         CreatePaymentInput {
             idempotency_key: "checkout-order-10001".into(),
+            request_hash: "a".repeat(64),
             merchant_reference: "ORDER-10001".into(),
             amount: 250_000,
             currency: "IDR".into(),
             description: Some("Test payment".into()),
         }
+    }
+
+    /// Matches the shape the real HTTP handler would build from
+    /// `api::dto::payment::PaymentResponse` closely enough for tests — the
+    /// exact fields don't matter here, only that a value is produced.
+    fn fake_response_snapshot(payment: &Payment) -> serde_json::Value {
+        serde_json::json!({"data": {"payment_id": payment.id.to_string()}})
     }
 
     fn available_provider(
@@ -825,7 +862,7 @@ mod tests {
         let merchant_id = Uuid::new_v4();
         let actor = Uuid::new_v4();
         let payment = service
-            .create_payment(merchant_id, actor, sample_input())
+            .create_payment(merchant_id, actor, sample_input(), fake_response_snapshot)
             .await
             .expect("create_payment should succeed");
 
@@ -838,10 +875,22 @@ mod tests {
 
         let calls = payment_tx.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let (tx_payment, tx_attempt, tx_audit) = &calls[0];
+        let (tx_payment, tx_attempt, tx_audit, tx_idempotency) = &calls[0];
         assert_eq!(tx_payment.id, payment.id);
         assert_eq!(tx_attempt.payment_id, payment.id);
         assert_eq!(tx_audit.actor, actor.to_string());
+
+        let idempotency = tx_idempotency
+            .as_ref()
+            .expect("idempotency row should be persisted atomically with the payment");
+        assert_eq!(idempotency.idempotency_key, "checkout-order-10001");
+        assert_eq!(idempotency.request_hash, "a".repeat(64));
+        assert_eq!(idempotency.payment_id, payment.id);
+        assert_eq!(idempotency.response_status_code.as_deref(), Some("201"));
+        assert_eq!(
+            idempotency.response_body,
+            Some(serde_json::json!({"data": {"payment_id": payment.id.to_string()}}))
+        );
     }
 
     #[tokio::test]
@@ -864,7 +913,12 @@ mod tests {
         input.amount = 0;
 
         let result = service
-            .create_payment(Uuid::new_v4(), Uuid::new_v4(), input)
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                input,
+                fake_response_snapshot,
+            )
             .await;
 
         assert!(matches!(result, Err(ApplicationError::Domain(_))));
@@ -894,7 +948,12 @@ mod tests {
         );
 
         let result = service
-            .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                sample_input(),
+                fake_response_snapshot,
+            )
             .await;
 
         assert!(matches!(result, Err(ApplicationError::NoProviderAvailable)));
@@ -920,7 +979,12 @@ mod tests {
         );
 
         let result = service
-            .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                sample_input(),
+                fake_response_snapshot,
+            )
             .await;
 
         assert!(matches!(result, Err(ApplicationError::Provider(_))));
@@ -952,7 +1016,12 @@ mod tests {
         );
 
         let result = service
-            .create_payment(Uuid::new_v4(), Uuid::new_v4(), sample_input())
+            .create_payment(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                sample_input(),
+                fake_response_snapshot,
+            )
             .await;
 
         assert!(matches!(result, Err(ApplicationError::Domain(_))));
